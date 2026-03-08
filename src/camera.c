@@ -1,0 +1,92 @@
+#include "camera.h"
+#include <math.h>
+#include <string.h>
+
+void camera_init(Camera *c, float x, float y, float z) {
+    c->pos[0] = x; c->pos[1] = y; c->pos[2] = z;
+    c->yaw = -3.14159265f / 2.0f; /* looking down -Z */
+    c->pitch = 0.0f;
+    c->fov = 1.0472f; /* 60 degrees */
+    c->aspect = 16.0f / 9.0f;
+    c->near = 0.1f;
+    c->far = 10000.0f;
+}
+
+void camera_forward(const Camera *c, float out[3]) {
+    out[0] = cosf(c->pitch) * cosf(c->yaw);
+    out[1] = sinf(c->pitch);
+    out[2] = cosf(c->pitch) * sinf(c->yaw);
+}
+
+void camera_right(const Camera *c, float out[3]) {
+    out[0] = cosf(c->yaw + 1.5707963f);
+    out[1] = 0.0f;
+    out[2] = sinf(c->yaw + 1.5707963f);
+}
+
+void camera_update(Camera *c, float dx, float dy, float dz, float dyaw, float dpitch) {
+    c->pos[0] += dx;
+    c->pos[1] += dy;
+    c->pos[2] += dz;
+    c->yaw += dyaw;
+    c->pitch -= dpitch;
+    if (c->pitch >  1.5f) c->pitch =  1.5f;
+    if (c->pitch < -1.5f) c->pitch = -1.5f;
+}
+
+static void mat4_zero(float m[16]) { memset(m, 0, 16 * sizeof(float)); }
+
+static void mat4_perspective(float m[16], float fov, float aspect, float near, float far) {
+    mat4_zero(m);
+    float t = tanf(fov / 2.0f);
+    m[0]  = 1.0f / (aspect * t);
+    m[5]  = 1.0f / t;
+    m[10] = -(far + near) / (far - near);
+    m[11] = -1.0f;
+    m[14] = -(2.0f * far * near) / (far - near);
+}
+
+static void mat4_look(float m[16], const float eye[3], const float fwd[3], const float up[3]) {
+    /* right = fwd x up */
+    float r[3] = {
+        fwd[1]*up[2] - fwd[2]*up[1],
+        fwd[2]*up[0] - fwd[0]*up[2],
+        fwd[0]*up[1] - fwd[1]*up[0]
+    };
+    /* true up = right x fwd */
+    float u[3] = {
+        r[1]*fwd[2] - r[2]*fwd[1],
+        r[2]*fwd[0] - r[0]*fwd[2],
+        r[0]*fwd[1] - r[1]*fwd[0]
+    };
+
+    mat4_zero(m);
+    m[0] = r[0];  m[4] = r[1];  m[8]  = r[2];
+    m[1] = u[0];  m[5] = u[1];  m[9]  = u[2];
+    m[2] = -fwd[0]; m[6] = -fwd[1]; m[10] = -fwd[2];
+    m[12] = -(r[0]*eye[0] + r[1]*eye[1] + r[2]*eye[2]);
+    m[13] = -(u[0]*eye[0] + u[1]*eye[1] + u[2]*eye[2]);
+    m[14] = fwd[0]*eye[0] + fwd[1]*eye[1] + fwd[2]*eye[2];
+    m[15] = 1.0f;
+}
+
+static void mat4_mul(float out[16], const float a[16], const float b[16]) {
+    float tmp[16];
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) {
+            tmp[c*4+r] = 0;
+            for (int k = 0; k < 4; k++)
+                tmp[c*4+r] += a[k*4+r] * b[c*4+k];
+        }
+    memcpy(out, tmp, sizeof(tmp));
+}
+
+void camera_mvp(const Camera *c, float out[16]) {
+    float fwd[3], up[3] = {0, 1, 0};
+    camera_forward(c, fwd);
+
+    float view[16], proj[16];
+    mat4_perspective(proj, c->fov, c->aspect, c->near, c->far);
+    mat4_look(view, c->pos, fwd, up);
+    mat4_mul(out, proj, view);
+}
