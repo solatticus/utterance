@@ -20,6 +20,7 @@ typedef struct {
 
 void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, float wrap_width);
 void text_upload(TextMesh *mesh);
+int  text_hit_test(const TextMesh *mesh, float x, float y, float radius);
 void text_destroy(TextMesh *mesh);
 
 #endif

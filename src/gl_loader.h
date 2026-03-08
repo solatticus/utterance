@@ -46,7 +46,13 @@
     X(void, DeleteBuffers, GLsizei n, const GLuint *buffers) \
     X(void, DeleteTextures, GLsizei n, const GLuint *textures) \
     X(void, PixelStorei, GLenum pname, GLint param) \
-    X(void, TexSubImage2D, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
+    X(void, TexSubImage2D, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels) \
+    X(void, GenFramebuffers, GLsizei n, GLuint *framebuffers) \
+    X(void, BindFramebuffer, GLenum target, GLuint framebuffer) \
+    X(void, FramebufferTexture2D, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) \
+    X(GLenum, CheckFramebufferStatus, GLenum target) \
+    X(void, DeleteFramebuffers, GLsizei n, const GLuint *framebuffers) \
+    X(void, Uniform2f, GLint location, GLfloat v0, GLfloat v1)
 
 /* Declare function pointers as gl* */
 #define X(ret, name, ...) extern ret (APIENTRY *gl##name)(__VA_ARGS__);

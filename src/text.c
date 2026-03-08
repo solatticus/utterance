@@ -114,6 +114,20 @@ void text_upload(TextMesh *mesh) {
     free(verts);
 }
 
+int text_hit_test(const TextMesh *mesh, float x, float y, float radius) {
+    for (int i = 0; i < mesh->count; i++) {
+        GlyphInstance *g = &mesh->instances[i];
+        /* Center of glyph */
+        float cx = g->x + g->w * 0.5f;
+        float cy = g->y + g->h * 0.5f;
+        float dx = x - cx;
+        float dy = y - cy;
+        if (dx * dx + dy * dy < radius * radius)
+            return 1;
+    }
+    return 0;
+}
+
 void text_destroy(TextMesh *mesh) {
     if (mesh->vao) glDeleteVertexArrays(1, &mesh->vao);
     if (mesh->vbo) glDeleteBuffers(1, &mesh->vbo);
