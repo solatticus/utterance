@@ -8,7 +8,8 @@ typedef struct {
     int width, height;
     double mouse_x, mouse_y;
     double last_mouse_x, last_mouse_y;
-    int mouse_captured;
+    int mouse_captured;    /* right-click held = mouselook */
+    int blink_triggered;   /* left-click edge = blink */
     float dt;
     double last_time;
 } Window;

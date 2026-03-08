@@ -35,6 +35,7 @@ int window_init(Window *w, int width, int height, const char *title) {
     w->last_mouse_x = w->mouse_x;
     w->last_mouse_y = w->mouse_y;
     w->mouse_captured = 0;
+    w->blink_triggered = 0;
     w->last_time = glfwGetTime();
     w->dt = 0.0f;
     return 0;
@@ -50,18 +51,26 @@ void window_poll(Window *w) {
     glfwPollEvents();
     glfwGetCursorPos(w->handle, &w->mouse_x, &w->mouse_y);
 
-    /* Click to capture, Escape to release */
-    if (glfwGetMouseButton(w->handle, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !w->mouse_captured) {
+    /* Right-click hold = mouselook */
+    int rmb = glfwGetMouseButton(w->handle, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    if (rmb && !w->mouse_captured) {
         glfwSetInputMode(w->handle, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         w->mouse_captured = 1;
         w->last_mouse_x = w->mouse_x;
         w->last_mouse_y = w->mouse_y;
-    }
-    if (glfwGetKey(w->handle, GLFW_KEY_ESCAPE) == GLFW_PRESS && w->mouse_captured) {
+    } else if (!rmb && w->mouse_captured) {
         glfwSetInputMode(w->handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         w->mouse_captured = 0;
     }
-    if (glfwGetKey(w->handle, GLFW_KEY_Q) == GLFW_PRESS) {
+
+    /* Left-click = blink (edge-triggered) */
+    static int prev_lmb = GLFW_RELEASE;
+    int lmb = glfwGetMouseButton(w->handle, GLFW_MOUSE_BUTTON_LEFT);
+    w->blink_triggered = (lmb == GLFW_PRESS && prev_lmb == GLFW_RELEASE);
+    prev_lmb = lmb;
+
+    if (glfwGetKey(w->handle, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+        glfwGetKey(w->handle, GLFW_KEY_Q) == GLFW_PRESS) {
         glfwSetWindowShouldClose(w->handle, GLFW_TRUE);
     }
 }

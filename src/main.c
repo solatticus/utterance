@@ -110,13 +110,27 @@ int main(int argc, char **argv) {
 
     static const float text_color[3] = {0.85f, 0.9f, 0.95f};
     static const float fps_color[3]  = {0.4f, 0.4f, 0.45f};
+    float speed_mult = 1.0f;
+    float blink_dist = 200.0f;  /* base blink distance, scales with speed_mult */
+    int prev_plus = GLFW_RELEASE, prev_minus = GLFW_RELEASE;
+    int prev_blink = GLFW_RELEASE;
 
     /* Main loop */
     while (!window_should_close(&win)) {
         window_poll(&win);
 
+        /* Speed adjustment: +/- keys, edge-triggered */
+        int cur_plus = glfwGetKey(win.handle, GLFW_KEY_EQUAL);   /* =/+ key */
+        int cur_minus = glfwGetKey(win.handle, GLFW_KEY_MINUS);
+        if (cur_plus == GLFW_PRESS && prev_plus == GLFW_RELEASE)
+            speed_mult *= 1.25f;
+        if (cur_minus == GLFW_PRESS && prev_minus == GLFW_RELEASE)
+            speed_mult *= 0.80f;  /* inverse of 1.25 */
+        prev_plus = cur_plus;
+        prev_minus = cur_minus;
+
         /* Input */
-        float speed = 100.0f * win.dt;
+        float speed = 100.0f * speed_mult * win.dt;
         if (glfwGetKey(win.handle, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
             speed *= 5.0f;
 
@@ -125,12 +139,27 @@ int main(int argc, char **argv) {
         camera_right(&cam, right);
 
         float dx = 0, dy = 0, dz = 0;
-        if (glfwGetKey(win.handle, GLFW_KEY_W) == GLFW_PRESS) { dx += fwd[0]*speed; dy += fwd[1]*speed; dz += fwd[2]*speed; }
-        if (glfwGetKey(win.handle, GLFW_KEY_S) == GLFW_PRESS) { dx -= fwd[0]*speed; dy -= fwd[1]*speed; dz -= fwd[2]*speed; }
-        if (glfwGetKey(win.handle, GLFW_KEY_A) == GLFW_PRESS) { dx -= right[0]*speed; dy -= right[1]*speed; dz -= right[2]*speed; }
-        if (glfwGetKey(win.handle, GLFW_KEY_D) == GLFW_PRESS) { dx += right[0]*speed; dy += right[1]*speed; dz += right[2]*speed; }
-        if (glfwGetKey(win.handle, GLFW_KEY_SPACE) == GLFW_PRESS) dy += speed;
-        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) dy -= speed;
+        float fspeed = speed * 4.0f;   /* forward: 4x base */
+        float bspeed = speed * 2.5f;   /* backward: 2.5x base */
+        if (glfwGetKey(win.handle, GLFW_KEY_W) == GLFW_PRESS) { dx += fwd[0]*fspeed; dy += fwd[1]*fspeed; dz += fwd[2]*fspeed; }
+        if (glfwGetKey(win.handle, GLFW_KEY_S) == GLFW_PRESS) { dx -= fwd[0]*bspeed; dy -= fwd[1]*bspeed; dz -= fwd[2]*bspeed; }
+        float sspeed = speed * 3.0f;   /* strafe/vertical: 3x base */
+        if (glfwGetKey(win.handle, GLFW_KEY_A) == GLFW_PRESS) { dx -= right[0]*sspeed; dy -= right[1]*sspeed; dz -= right[2]*sspeed; }
+        if (glfwGetKey(win.handle, GLFW_KEY_D) == GLFW_PRESS) { dx += right[0]*sspeed; dy += right[1]*sspeed; dz += right[2]*sspeed; }
+        if (glfwGetKey(win.handle, GLFW_KEY_SPACE) == GLFW_PRESS) dy += sspeed;
+        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) dy -= sspeed;
+
+        /* Blink: left-click or F = teleport forward */
+        int cur_blink = glfwGetKey(win.handle, GLFW_KEY_F);
+        int do_blink = win.blink_triggered ||
+                       (cur_blink == GLFW_PRESS && prev_blink == GLFW_RELEASE);
+        if (do_blink) {
+            float dist = blink_dist * speed_mult;
+            dx += fwd[0] * dist;
+            dy += fwd[1] * dist;
+            dz += fwd[2] * dist;
+        }
+        prev_blink = cur_blink;
 
         float dyaw = 0, dpitch = 0;
         if (win.mouse_captured) {
