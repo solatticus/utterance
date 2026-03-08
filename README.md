@@ -1,17 +1,17 @@
 # utterance
 
-Your text viewer has two dimensions. That's cute.
+`cat` prints. `less` scrolls. `ut` puts you inside it.
 
-Pipe anything in. Walk through it. **598KB**, links `libc` and `libm`. That's it. No Electron. No "frameworks." No npm install that downloads a small country. Just text, in space, and you're inside it.
+Pipe any text into a 3D space and walk through it. SDF font rendering, FPS camera, blink teleport with post-processing. **602KB**. Links `libc` and `libm`. Nothing else. Runs on a Raspberry Pi 3, a 2011 ThinkPad, whatever you forgot in that drawer. Falls back to `cat` when there's no display.
 
 ```
-echo 'hello world' | utterance
+echo 'hello world' | ut
+man bash | ut
 dmesg | ut
+journalctl -b | ut
 cat war_and_peace.txt | ut
-ut -f /path/to/your/fancy/font.ttf somefile.c
+ut -f /path/to/font.ttf somefile.c
 ```
-
-Falls back to `cat` when there's no display. Because unlike your app, this one actually works everywhere.
 
 ## What it does
 
@@ -65,7 +65,7 @@ Runtime: `libc` + `libm`. Runs on a Raspberry Pi 3. Runs on your 2011 ThinkPad. 
 - FBO post-processing pipeline for blink effects (one uber-shader, zero overhead when idle)
 - UTF-8 decoding, perspective + orthographic rendering, zero runtime allocations in the render loop
 
-589K → 598K after adding four post-processing effects and an FBO pipeline. Your `node_modules` is crying.
+602K with four post-processing effects, an FBO pipeline, lazy glyph atlas, and animated blink. Your `node_modules` is crying.
 
 ## Philosophy
 
