@@ -48,18 +48,20 @@ void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, fl
             cursor_y -= line_height;
         }
 
-        GlyphInstance inst;
-        inst.x = cursor_x + g->x_off;
-        inst.y = cursor_y - g->y_off - g->height; /* flip Y: OpenGL up, font down */
-        inst.z = cursor_z;
-        inst.w = g->width;
-        inst.h = g->height;
-        inst.s0 = g->s0;
-        inst.t0 = g->t0;
-        inst.s1 = g->s1;
-        inst.t1 = g->t1;
-
-        push_instance(mesh, &inst);
+        /* Only emit a quad if glyph has a visible bitmap */
+        if (g->width > 0 && g->height > 0) {
+            GlyphInstance inst;
+            inst.x = cursor_x + g->x_off;
+            inst.y = cursor_y - g->y_off - g->height; /* flip Y: OpenGL up, font down */
+            inst.z = cursor_z;
+            inst.w = g->width;
+            inst.h = g->height;
+            inst.s0 = g->s0;
+            inst.t0 = g->t0;
+            inst.s1 = g->s1;
+            inst.t1 = g->t1;
+            push_instance(mesh, &inst);
+        }
         cursor_x += g->advance;
     }
 }

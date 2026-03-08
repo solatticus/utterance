@@ -72,7 +72,9 @@ int main(int argc, char **argv) {
 
     /* 3. Font */
     Font font;
+    double t0 = glfwGetTime();
     if (font_load(&font, font_path, 48.0f) < 0) return 1;
+    fprintf(stderr, "utterance: font loaded in %.2fs\n", glfwGetTime() - t0);
 
     /* 4. Layout */
     TextMesh mesh;

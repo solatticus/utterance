@@ -45,21 +45,24 @@ int font_load(Font *f, const char *ttf_path, float px_size) {
     f->line_gap = lg * f->scale;
 
     /* SDF atlas generation */
-    int atlas_w = 2048, atlas_h = 2048;
+    int atlas_w = 4096, atlas_h = 4096;
     unsigned char *atlas = calloc(atlas_w * atlas_h, 1);
     int pen_x = 0, pen_y = 0, row_h = 0;
     int padding = 5;
     float onedge = 128.0f;
     float dist_scale = onedge / (float)padding;
 
-    /* Generate glyphs for printable ASCII + Latin-1 + common Unicode ranges */
-    /* Start with 32-126 and 160-255 for M1 */
-    int ranges[][2] = { {32, 126}, {160, 255}, {0x2000, 0x206F}, {0x2190, 0x21FF}, {0x2500, 0x257F}, {0, 0} };
-
-    for (int ri = 0; ranges[ri][0] || ranges[ri][1]; ri++) {
-        for (int cp = ranges[ri][0]; cp <= ranges[ri][1]; cp++) {
+    /* Walk the entire BMP — if the font has it, atlas it */
+    for (int cp = 32; cp < 65536; cp++) {
+        {
             int gi = stbtt_FindGlyphIndex(&info, cp);
-            if (gi == 0 && cp != 0) continue;
+            if (gi == 0) continue;
+
+            /* Always store advance for present glyphs (space, etc.) */
+            int advance, lsb;
+            stbtt_GetGlyphHMetrics(&info, gi, &advance, &lsb);
+            f->glyphs[cp].advance = advance * f->scale;
+            f->glyphs[cp].present = 1;
 
             int w, h, xoff, yoff;
             unsigned char *sdf = stbtt_GetGlyphSDF(&info, f->scale, gi, padding,
@@ -96,18 +99,13 @@ int font_load(Font *f, const char *ttf_path, float px_size) {
             g->y_off = (float)yoff;
             g->width = (float)w;
             g->height = (float)h;
-            g->present = 1;
-
-            int advance, lsb;
-            stbtt_GetGlyphHMetrics(&info, gi, &advance, &lsb);
-            g->advance = advance * f->scale;
 
             pen_x += w + 1;
             if (h > row_h) row_h = h;
 
             stbtt_FreeSDF(sdf, NULL);
         }
-    }
+    }  /* end BMP walk */
 
     /* Upload atlas to GPU */
     glGenTextures(1, &f->texture);

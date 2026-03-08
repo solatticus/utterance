@@ -106,23 +106,25 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     int n = 0;
     float cx = x, cy = y;
 
-    for (const char *p = str; *p && n < 128; p++, n++) {
+    for (const char *p = str; *p && n < 128; p++) {
         Glyph *g = font_glyph(font, (uint32_t)(unsigned char)*p);
         if (!g) continue;
 
-        float x0 = cx + g->x_off * scale;
-        float y0 = cy + (font->ascent + g->y_off) * scale;
-        float x1 = x0 + g->width * scale;
-        float y1 = y0 + g->height * scale;
+        if (g->width > 0 && g->height > 0) {
+            float x0 = cx + g->x_off * scale;
+            float y0 = cy + (font->ascent + g->y_off) * scale;
+            float x1 = x0 + g->width * scale;
+            float y1 = y0 + g->height * scale;
 
-        float *v = verts + n * 30;
-        v[0]=x0; v[1]=y0; v[2]=0; v[3]=g->s0; v[4]=g->t0;
-        v[5]=x0; v[6]=y1; v[7]=0; v[8]=g->s0; v[9]=g->t1;
-        v[10]=x1; v[11]=y1; v[12]=0; v[13]=g->s1; v[14]=g->t1;
-        v[15]=x0; v[16]=y0; v[17]=0; v[18]=g->s0; v[19]=g->t0;
-        v[20]=x1; v[21]=y1; v[22]=0; v[23]=g->s1; v[24]=g->t1;
-        v[25]=x1; v[26]=y0; v[27]=0; v[28]=g->s1; v[29]=g->t0;
-
+            float *v = verts + n * 30;
+            v[0]=x0; v[1]=y0; v[2]=0; v[3]=g->s0; v[4]=g->t0;
+            v[5]=x0; v[6]=y1; v[7]=0; v[8]=g->s0; v[9]=g->t1;
+            v[10]=x1; v[11]=y1; v[12]=0; v[13]=g->s1; v[14]=g->t1;
+            v[15]=x0; v[16]=y0; v[17]=0; v[18]=g->s0; v[19]=g->t0;
+            v[20]=x1; v[21]=y1; v[22]=0; v[23]=g->s1; v[24]=g->t1;
+            v[25]=x1; v[26]=y0; v[27]=0; v[28]=g->s1; v[29]=g->t0;
+            n++;
+        }
         cx += g->advance * scale;
     }
     if (n == 0) return;
