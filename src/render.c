@@ -164,8 +164,75 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     glBindVertexArray(0);
 }
 
+/* --- Highlight quad (world-space colored rectangle) --- */
+
+static const char *hl_vert_src =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 a_pos;\n"
+    "uniform mat4 u_mvp;\n"
+    "void main() {\n"
+    "    gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+    "}\n";
+
+static const char *hl_frag_src =
+    "#version 330 core\n"
+    "out vec4 frag_color;\n"
+    "uniform vec4 u_color;\n"
+    "void main() {\n"
+    "    frag_color = u_color;\n"
+    "}\n";
+
+static GLuint hl_program = 0;
+static GLint  hl_loc_mvp, hl_loc_color;
+static GLuint hl_vao, hl_vbo;
+
+static void hl_ensure_init(void) {
+    if (hl_program) return;
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, hl_vert_src);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, hl_frag_src);
+    hl_program = glCreateProgram();
+    glAttachShader(hl_program, vs);
+    glAttachShader(hl_program, fs);
+    glLinkProgram(hl_program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    hl_loc_mvp = glGetUniformLocation(hl_program, "u_mvp");
+    hl_loc_color = glGetUniformLocation(hl_program, "u_color");
+
+    glGenVertexArrays(1, &hl_vao);
+    glBindVertexArray(hl_vao);
+    glGenBuffers(1, &hl_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, hl_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 6 * 3 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+}
+
+void render_highlight(const float mvp[16], const float bounds[4], const float color[3], float alpha) {
+    hl_ensure_init();
+    float x0 = bounds[0], y0 = bounds[1], x1 = bounds[2], y1 = bounds[3];
+    float verts[18] = {
+        x0, y0, 0,  x1, y0, 0,  x1, y1, 0,
+        x0, y0, 0,  x1, y1, 0,  x0, y1, 0,
+    };
+    glBindBuffer(GL_ARRAY_BUFFER, hl_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+
+    glUseProgram(hl_program);
+    glUniformMatrix4fv(hl_loc_mvp, 1, GL_FALSE, mvp);
+    glUniform4f(hl_loc_color, color[0], color[1], color[2], alpha);
+
+    glBindVertexArray(hl_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
 void render_destroy(void) {
     if (overlay_vbo) glDeleteBuffers(1, &overlay_vbo);
     if (overlay_vao) glDeleteVertexArrays(1, &overlay_vao);
     if (program) glDeleteProgram(program);
+    if (hl_vbo) glDeleteBuffers(1, &hl_vbo);
+    if (hl_vao) glDeleteVertexArrays(1, &hl_vao);
+    if (hl_program) glDeleteProgram(hl_program);
 }

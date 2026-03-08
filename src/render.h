@@ -7,6 +7,7 @@
 void render_init(void);
 void render_text(const TextMesh *mesh, const Font *font, const float mvp[16], const float color[3]);
 void render_overlay(Font *font, const char *str, float x, float y, float scale, int win_w, int win_h, const float color[3]);
+void render_highlight(const float mvp[16], const float bounds[4], const float color[3], float alpha);
 void render_destroy(void);
 
 #endif

@@ -3,6 +3,7 @@
 #include "utf8.h"
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 static int push_instance(TextMesh *mesh, GlyphInstance *inst) {
     if (mesh->count >= mesh->capacity) {
@@ -28,6 +29,7 @@ void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, fl
     const uint8_t *end = text + len;
 
     while (p < end) {
+        const uint8_t *cp_start = p;
         uint32_t cp = utf8_decode(&p, end);
         if (cp == 0) break;
 
@@ -63,6 +65,7 @@ void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, fl
             inst.t0 = g->t0;
             inst.s1 = g->s1;
             inst.t1 = g->t1;
+            inst.text_offset = (int)(cp_start - text);
             if (push_instance(mesh, &inst) < 0) break; /* OOM */
         }
         cursor_x += g->advance;
@@ -117,7 +120,6 @@ void text_upload(TextMesh *mesh) {
 int text_hit_test(const TextMesh *mesh, float x, float y, float radius) {
     for (int i = 0; i < mesh->count; i++) {
         GlyphInstance *g = &mesh->instances[i];
-        /* Center of glyph */
         float cx = g->x + g->w * 0.5f;
         float cy = g->y + g->h * 0.5f;
         float dx = x - cx;
@@ -126,6 +128,105 @@ int text_hit_test(const TextMesh *mesh, float x, float y, float radius) {
             return 1;
     }
     return 0;
+}
+
+int text_word_bounds(const TextMesh *mesh, float x, float y, float out[4]) {
+    /* Find closest glyph to (x,y) */
+    float best = 1e30f;
+    int hit = -1;
+    for (int i = 0; i < mesh->count; i++) {
+        GlyphInstance *g = &mesh->instances[i];
+        float cx = g->x + g->w * 0.5f;
+        float cy = g->y + g->h * 0.5f;
+        float d = (x - cx)*(x - cx) + (y - cy)*(y - cy);
+        if (d < best) { best = d; hit = i; }
+    }
+    if (hit < 0) return 0;
+
+    GlyphInstance *h = &mesh->instances[hit];
+    float line_y = h->y;
+    float line_tol = h->h * 0.5f; /* same-line tolerance */
+
+    /* Expand left: find contiguous glyphs on same line */
+    int left = hit, right = hit;
+    for (int i = hit - 1; i >= 0; i--) {
+        GlyphInstance *g = &mesh->instances[i];
+        if (fabsf(g->y - line_y) > line_tol) break; /* different line */
+        float gap = mesh->instances[i+1].x - (g->x + g->w);
+        if (gap > g->w * 0.8f) break; /* word boundary (space-sized gap) */
+        left = i;
+    }
+    /* Expand right */
+    for (int i = hit + 1; i < mesh->count; i++) {
+        GlyphInstance *g = &mesh->instances[i];
+        if (fabsf(g->y - line_y) > line_tol) break;
+        float gap = g->x - (mesh->instances[i-1].x + mesh->instances[i-1].w);
+        if (gap > g->w * 0.8f) break;
+        right = i;
+    }
+
+    /* Compute bounds with small padding */
+    out[0] = mesh->instances[left].x - 2.0f;
+    out[1] = mesh->instances[left].y - 2.0f;
+    out[2] = mesh->instances[right].x + mesh->instances[right].w + 2.0f;
+    out[3] = mesh->instances[left].y + mesh->instances[left].h + 2.0f;
+    return 1;
+}
+
+int text_glyph_at(const TextMesh *mesh, float x, float y) {
+    float best = 1e30f;
+    int hit = -1;
+    for (int i = 0; i < mesh->count; i++) {
+        GlyphInstance *g = &mesh->instances[i];
+        float cx = g->x + g->w * 0.5f;
+        float cy = g->y + g->h * 0.5f;
+        float d = (x - cx)*(x - cx) + (y - cy)*(y - cy);
+        if (d < best) { best = d; hit = i; }
+    }
+    return hit;
+}
+
+int text_selection_rects(const TextMesh *mesh, int g0, int g1, float rects[][4], int max_rects) {
+    if (g0 < 0 || g1 < 0 || mesh->count == 0 || max_rects <= 0) return 0;
+    int lo = g0 < g1 ? g0 : g1;
+    int hi = g0 < g1 ? g1 : g0;
+    if (lo < 0) lo = 0;
+    if (hi >= mesh->count) hi = mesh->count - 1;
+
+    int n = 0;
+    GlyphInstance *first = &mesh->instances[lo];
+    float rx0 = first->x, ry0 = first->y;
+    float rx1 = first->x + first->w, ry1 = first->y + first->h;
+    float line_y = first->y;
+    float tol = first->h * 0.5f;
+
+    for (int i = lo + 1; i <= hi; i++) {
+        GlyphInstance *g = &mesh->instances[i];
+        if (fabsf(g->y - line_y) > tol) {
+            /* New line — emit current rect */
+            if (n < max_rects) {
+                rects[n][0] = rx0; rects[n][1] = ry0;
+                rects[n][2] = rx1; rects[n][3] = ry1;
+                n++;
+            }
+            line_y = g->y;
+            tol = g->h * 0.5f;
+            rx0 = g->x; ry0 = g->y;
+            rx1 = g->x + g->w; ry1 = g->y + g->h;
+        } else {
+            if (g->x < rx0) rx0 = g->x;
+            if (g->y < ry0) ry0 = g->y;
+            if (g->x + g->w > rx1) rx1 = g->x + g->w;
+            if (g->y + g->h > ry1) ry1 = g->y + g->h;
+        }
+    }
+    /* Emit last rect */
+    if (n < max_rects) {
+        rects[n][0] = rx0; rects[n][1] = ry0;
+        rects[n][2] = rx1; rects[n][3] = ry1;
+        n++;
+    }
+    return n;
 }
 
 void text_destroy(TextMesh *mesh) {

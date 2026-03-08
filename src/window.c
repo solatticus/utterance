@@ -8,6 +8,12 @@ static void fb_resize_cb(GLFWwindow *win, int w, int h) {
     uw->height = h;
 }
 
+static void scroll_cb(GLFWwindow *win, double xoff, double yoff) {
+    (void)xoff;
+    Window *uw = glfwGetWindowUserPointer(win);
+    uw->scroll_y += (float)yoff;
+}
+
 int window_init(Window *w, int width, int height, const char *title) {
     if (!glfwInit()) {
         fprintf(stderr, "utterance: glfwInit failed\n");
@@ -29,13 +35,17 @@ int window_init(Window *w, int width, int height, const char *title) {
     glfwSwapInterval(1);
     glfwSetWindowUserPointer(w->handle, w);
     glfwSetFramebufferSizeCallback(w->handle, fb_resize_cb);
+    glfwSetScrollCallback(w->handle, scroll_cb);
 
     glfwGetFramebufferSize(w->handle, &w->width, &w->height);
     glfwGetCursorPos(w->handle, &w->mouse_x, &w->mouse_y);
     w->last_mouse_x = w->mouse_x;
     w->last_mouse_y = w->mouse_y;
     w->mouse_captured = 0;
-    w->blink_triggered = 0;
+    w->lmb_pressed = 0;
+    w->lmb_released = 0;
+    w->lmb_held = 0;
+    w->scroll_y = 0.0f;
     w->last_time = glfwGetTime();
     w->dt = 0.0f;
     return 0;
@@ -48,6 +58,7 @@ void window_poll(Window *w) {
 
     w->last_mouse_x = w->mouse_x;
     w->last_mouse_y = w->mouse_y;
+    w->scroll_y = 0.0f;
     glfwPollEvents();
     glfwGetCursorPos(w->handle, &w->mouse_x, &w->mouse_y);
 
@@ -63,10 +74,12 @@ void window_poll(Window *w) {
         w->mouse_captured = 0;
     }
 
-    /* Left-click = blink (edge-triggered) */
+    /* Left mouse button state */
     static int prev_lmb = GLFW_RELEASE;
     int lmb = glfwGetMouseButton(w->handle, GLFW_MOUSE_BUTTON_LEFT);
-    w->blink_triggered = (lmb == GLFW_PRESS && prev_lmb == GLFW_RELEASE);
+    w->lmb_pressed = (lmb == GLFW_PRESS && prev_lmb == GLFW_RELEASE);
+    w->lmb_released = (lmb == GLFW_RELEASE && prev_lmb == GLFW_PRESS);
+    w->lmb_held = (lmb == GLFW_PRESS);
     prev_lmb = lmb;
 
     if (glfwGetKey(w->handle, GLFW_KEY_ESCAPE) == GLFW_PRESS ||

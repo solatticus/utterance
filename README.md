@@ -2,7 +2,7 @@
 
 `cat` prints. `less` scrolls. `ut` puts you inside it.
 
-Pipe any text into a 3D space and walk through it. SDF font rendering, FPS camera, blink teleport with post-processing. **602KB**. Links `libc` and `libm`. Nothing else. Runs on a Raspberry Pi 3, a 2011 ThinkPad, whatever you forgot in that drawer. Falls back to `cat` when there's no display.
+Pipe any text into a 3D space and walk through it. SDF font rendering, FPS camera, blink teleport with post-processing, text selection with copy. **625KB**. Links `libc` and `libm`. Nothing else. Runs on a Raspberry Pi 3, a 2011 ThinkPad, whatever you forgot in that drawer. Falls back to `cat` when there's no display.
 
 ```
 echo 'hello world' | ut
@@ -15,7 +15,7 @@ ut -f /path/to/font.ttf somefile.c
 
 ## What it does
 
-SDF font rendering. Full BMP atlas (codepoints 32–65535). OpenGL 3.3 core. FPS camera. You're inside the text. You fly through it. That's the whole thing, and it's more than most text editors manage.
+SDF font rendering. Full BMP atlas (codepoints 32–65535). OpenGL 3.3 core. FPS camera. You're inside the text. You fly through it. Select it. Copy it. That's the whole thing, and it's more than most text editors manage.
 
 ## Controls
 
@@ -25,20 +25,28 @@ SDF font rendering. Full BMP atlas (codepoints 32–65535). OpenGL 3.3 core. FPS
 | **Space / Ctrl** | Up / Down |
 | **Shift** | 5× speed, for when you have places to be |
 | **+/-** | Speed multiplier (stacks) |
+| **Scroll wheel** | Scroll vertically |
 | **Right-click** | Mouselook |
-| **F / Left-click** | Blink — raycast teleport to where you're looking |
+| **Left-click** | Blink — raycast teleport to where you click |
+| **Click + drag** | Select text |
+| **Ctrl+C** | Copy selection to clipboard |
+| **F** | Blink — raycast teleport to crosshair |
 | **\\** | Cycle blink effects (vignette → tunnel → chromatic → scanline → off) |
 | **Q / Esc** | Quit |
 
 ## Blink
 
-Aim the crosshair at text. Press F. You fly there. If there's text at the destination, you stop. If there isn't, you bounce back — because even the teleport has taste.
+Click on text or press F. You fly there. The camera auto-aims toward the hit point and lands at a comfortable reading distance (~25 lines visible). If there's text at the destination, you stop and the word glows briefly. If there isn't, you bounce back — because even the teleport has taste.
 
 Four post-processing effects, toggled with `\`:
 - **Vignette** — the screen literally blinks. Snap shut, hold black, smooth open. The metaphor writes itself.
 - **Tunnel** — radial speed lines. Demoscene called, they want royalties.
 - **Chromatic aberration** — RGB splits at the edges. Space had a bad day.
 - **Scanline wipe** — CRT resync sweep with phosphor tint. For the nostalgic and the correct.
+
+## Selection
+
+Click and drag to select text. Blue highlight behind the selected glyphs, one rect per line. Ctrl+C copies the selection (including whitespace) to your system clipboard. Click anywhere to clear.
 
 ## Building
 
@@ -63,9 +71,10 @@ Runtime: `libc` + `libm`. Runs on a Raspberry Pi 3. Runs on your 2011 ThinkPad. 
 - SDF rendering with `fwidth()` antialiasing — crisp at any distance, any angle
 - 4096×4096 SDF atlas, lazy glyph rendering (only atlas what you see)
 - FBO post-processing pipeline for blink effects (one uber-shader, zero overhead when idle)
+- Camera unproject for mouse-to-world raycasting (blink targeting, text selection)
 - UTF-8 decoding, perspective + orthographic rendering, zero runtime allocations in the render loop
 
-602K with four post-processing effects, an FBO pipeline, lazy glyph atlas, and animated blink. Your `node_modules` is crying.
+625K with four post-processing effects, an FBO pipeline, lazy glyph atlas, animated blink, word highlight, and text selection. Your `node_modules` is crying.
 
 ## Philosophy
 

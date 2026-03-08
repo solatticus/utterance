@@ -95,3 +95,30 @@ void camera_mvp(const Camera *c, float out[16]) {
     mat4_look(view, c->pos, fwd, up);
     mat4_mul(out, proj, view);
 }
+
+void camera_screen_ray(const Camera *c, float ndc_x, float ndc_y, float dir[3]) {
+    /* Unproject NDC point through inverse projection into view space,
+       then rotate by camera orientation to get world-space ray direction. */
+    float t = tanf(c->fov / 2.0f);
+    /* View-space offset from center (NDC → view plane at z=-1) */
+    float vx = ndc_x * c->aspect * t;
+    float vy = ndc_y * t;
+
+    /* Camera basis vectors */
+    float fwd[3], right[3], up[3];
+    camera_forward(c, fwd);
+    camera_right(c, right);
+    /* up = right x fwd */
+    up[0] = right[1]*fwd[2] - right[2]*fwd[1];
+    up[1] = right[2]*fwd[0] - right[0]*fwd[2];
+    up[2] = right[0]*fwd[1] - right[1]*fwd[0];
+
+    /* fwd already points where camera looks — add view-plane offset */
+    dir[0] = fwd[0] + right[0]*vx + up[0]*vy;
+    dir[1] = fwd[1] + right[1]*vx + up[1]*vy;
+    dir[2] = fwd[2] + right[2]*vx + up[2]*vy;
+
+    /* Normalize */
+    float len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+    if (len > 0.0f) { dir[0] /= len; dir[1] /= len; dir[2] /= len; }
+}
