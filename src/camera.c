@@ -2,11 +2,16 @@
 #include <math.h>
 #include <string.h>
 
+#define PI_F       3.14159265f
+#define HALF_PI_F  1.57079632f
+#define DEG60_RAD  1.04719755f
+#define PITCH_LIMIT 1.5f
+
 void camera_init(Camera *c, float x, float y, float z) {
     c->pos[0] = x; c->pos[1] = y; c->pos[2] = z;
-    c->yaw = -3.14159265f / 2.0f; /* looking down -Z */
+    c->yaw = -HALF_PI_F; /* looking down -Z */
     c->pitch = 0.0f;
-    c->fov = 1.0472f; /* 60 degrees */
+    c->fov = DEG60_RAD;
     c->aspect = 16.0f / 9.0f;
     c->near = 0.1f;
     c->far = 10000.0f;
@@ -19,9 +24,9 @@ void camera_forward(const Camera *c, float out[3]) {
 }
 
 void camera_right(const Camera *c, float out[3]) {
-    out[0] = cosf(c->yaw + 1.5707963f);
+    out[0] = cosf(c->yaw + HALF_PI_F);
     out[1] = 0.0f;
-    out[2] = sinf(c->yaw + 1.5707963f);
+    out[2] = sinf(c->yaw + HALF_PI_F);
 }
 
 void camera_update(Camera *c, float dx, float dy, float dz, float dyaw, float dpitch) {
@@ -30,8 +35,8 @@ void camera_update(Camera *c, float dx, float dy, float dz, float dyaw, float dp
     c->pos[2] += dz;
     c->yaw += dyaw;
     c->pitch -= dpitch;
-    if (c->pitch >  1.5f) c->pitch =  1.5f;
-    if (c->pitch < -1.5f) c->pitch = -1.5f;
+    if (c->pitch >  PITCH_LIMIT) c->pitch =  PITCH_LIMIT;
+    if (c->pitch < -PITCH_LIMIT) c->pitch = -PITCH_LIMIT;
 }
 
 static void mat4_zero(float m[16]) { memset(m, 0, 16 * sizeof(float)); }

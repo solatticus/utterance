@@ -45,7 +45,8 @@
     X(void, DeleteVertexArrays, GLsizei n, const GLuint *arrays) \
     X(void, DeleteBuffers, GLsizei n, const GLuint *buffers) \
     X(void, DeleteTextures, GLsizei n, const GLuint *textures) \
-    X(void, PixelStorei, GLenum pname, GLint param)
+    X(void, PixelStorei, GLenum pname, GLint param) \
+    X(void, TexSubImage2D, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
 
 /* Declare function pointers as gl* */
 #define X(ret, name, ...) extern ret (APIENTRY *gl##name)(__VA_ARGS__);

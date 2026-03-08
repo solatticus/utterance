@@ -2,6 +2,7 @@
 #include "gl_loader.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const char *vert_src =
     "#version 330 core\n"
@@ -29,8 +30,14 @@ static const char *frag_src =
     "    frag_color = vec4(u_color, alpha);\n"
     "}\n";
 
+#define OVERLAY_MAX_CHARS 128
+#define OVERLAY_FLOATS_PER_GLYPH 30 /* 6 verts * 5 floats */
+
 static GLuint program;
 static GLint loc_mvp, loc_atlas, loc_color;
+
+/* Persistent overlay GPU objects — allocated once at init */
+static GLuint overlay_vao, overlay_vbo;
 
 static GLuint compile_shader(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
@@ -47,7 +54,7 @@ static GLuint compile_shader(GLenum type, const char *src) {
     return s;
 }
 
-int render_init(void) {
+void render_init(void) {
     GLuint vs = compile_shader(GL_VERTEX_SHADER, vert_src);
     GLuint fs = compile_shader(GL_FRAGMENT_SHADER, frag_src);
 
@@ -71,7 +78,19 @@ int render_init(void) {
     loc_atlas = glGetUniformLocation(program, "u_atlas");
     loc_color = glGetUniformLocation(program, "u_color");
 
-    return 0;
+    /* Allocate persistent overlay VAO/VBO */
+    glGenVertexArrays(1, &overlay_vao);
+    glBindVertexArray(overlay_vao);
+    glGenBuffers(1, &overlay_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 OVERLAY_MAX_CHARS * OVERLAY_FLOATS_PER_GLYPH * sizeof(float),
+                 NULL, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
 }
 
 void render_text(const TextMesh *mesh, const Font *font, const float mvp[16], const float color[3]) {
@@ -101,12 +120,12 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     ortho[13] =  1.0f;
     ortho[15] =  1.0f;
 
-    /* Layout glyphs into a small temp buffer */
-    float verts[6 * 5 * 128]; /* max 128 chars */
+    /* Layout glyphs into scratch buffer */
+    static float verts[OVERLAY_MAX_CHARS * OVERLAY_FLOATS_PER_GLYPH];
     int n = 0;
     float cx = x, cy = y;
 
-    for (const char *p = str; *p && n < 128; p++) {
+    for (const char *p = str; *p && n < OVERLAY_MAX_CHARS; p++) {
         Glyph *g = font_glyph(font, (uint32_t)(unsigned char)*p);
         if (!g) continue;
 
@@ -116,7 +135,7 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
             float x1 = x0 + g->width * scale;
             float y1 = y0 + g->height * scale;
 
-            float *v = verts + n * 30;
+            float *v = verts + n * OVERLAY_FLOATS_PER_GLYPH;
             v[0]=x0; v[1]=y0; v[2]=0; v[3]=g->s0; v[4]=g->t0;
             v[5]=x0; v[6]=y1; v[7]=0; v[8]=g->s0; v[9]=g->t1;
             v[10]=x1; v[11]=y1; v[12]=0; v[13]=g->s1; v[14]=g->t1;
@@ -129,16 +148,9 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     }
     if (n == 0) return;
 
-    GLuint vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glBindVertexArray(vao);
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, n * 30 * sizeof(float), verts, GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
+    /* Upload vertices to persistent VBO */
+    glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, n * OVERLAY_FLOATS_PER_GLYPH * sizeof(float), verts);
 
     glUseProgram(program);
     glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, ortho);
@@ -147,13 +159,13 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, font->texture);
 
+    glBindVertexArray(overlay_vao);
     glDrawArrays(GL_TRIANGLES, 0, n * 6);
-
     glBindVertexArray(0);
-    glDeleteBuffers(1, &vbo);
-    glDeleteVertexArrays(1, &vao);
 }
 
 void render_destroy(void) {
+    if (overlay_vbo) glDeleteBuffers(1, &overlay_vbo);
+    if (overlay_vao) glDeleteVertexArrays(1, &overlay_vao);
     if (program) glDeleteProgram(program);
 }

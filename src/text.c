@@ -4,12 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void push_instance(TextMesh *mesh, GlyphInstance *inst) {
+static int push_instance(TextMesh *mesh, GlyphInstance *inst) {
     if (mesh->count >= mesh->capacity) {
-        mesh->capacity = mesh->capacity ? mesh->capacity * 2 : 4096;
-        mesh->instances = realloc(mesh->instances, mesh->capacity * sizeof(GlyphInstance));
+        int new_cap = mesh->capacity ? mesh->capacity * 2 : 4096;
+        GlyphInstance *tmp = realloc(mesh->instances, (size_t)new_cap * sizeof(GlyphInstance));
+        if (!tmp) return -1;
+        mesh->instances = tmp;
+        mesh->capacity = new_cap;
     }
     mesh->instances[mesh->count++] = *inst;
+    return 0;
 }
 
 void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, float wrap_width) {
@@ -18,7 +22,6 @@ void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, fl
     float line_height = font->ascent - font->descent + font->line_gap;
     float cursor_x = 0.0f;
     float cursor_y = 0.0f;
-    float cursor_z = 0.0f;
     float tab_width = font->glyphs[' '].present ? font->glyphs[' '].advance * 4.0f : font->px_size;
 
     const uint8_t *p = text;
@@ -53,14 +56,14 @@ void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, fl
             GlyphInstance inst;
             inst.x = cursor_x + g->x_off;
             inst.y = cursor_y - g->y_off - g->height; /* flip Y: OpenGL up, font down */
-            inst.z = cursor_z;
+            inst.z = 0.0f;
             inst.w = g->width;
             inst.h = g->height;
             inst.s0 = g->s0;
             inst.t0 = g->t0;
             inst.s1 = g->s1;
             inst.t1 = g->t1;
-            push_instance(mesh, &inst);
+            if (push_instance(mesh, &inst) < 0) break; /* OOM */
         }
         cursor_x += g->advance;
     }
@@ -72,8 +75,9 @@ void text_upload(TextMesh *mesh) {
     /* 6 vertices per quad (2 triangles), 5 floats each (x,y,z,u,v) */
     int verts_per_glyph = 6;
     int floats_per_vert = 5;
-    int total_floats = mesh->count * verts_per_glyph * floats_per_vert;
+    size_t total_floats = (size_t)mesh->count * verts_per_glyph * floats_per_vert;
     float *verts = malloc(total_floats * sizeof(float));
+    if (!verts) return;
 
     for (int i = 0; i < mesh->count; i++) {
         GlyphInstance *g = &mesh->instances[i];

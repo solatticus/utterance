@@ -11,6 +11,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#define MOUSE_SENSITIVITY 0.002f
+
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "utterance: can't open %s\n", path); return NULL; }
@@ -18,6 +20,7 @@ static uint8_t *read_file(const char *path, size_t *len) {
     *len = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *buf = malloc(*len);
+    if (!buf) { fclose(f); return NULL; }
     if (fread(buf, 1, *len, f) != *len) { free(buf); fclose(f); return NULL; }
     fclose(f);
     return buf;
@@ -27,11 +30,17 @@ static uint8_t *read_stdin(size_t *len) {
     if (isatty(0)) return NULL;
     size_t cap = 1 << 20;
     uint8_t *buf = malloc(cap);
+    if (!buf) return NULL;
     size_t n = 0;
     ssize_t r;
     while ((r = read(0, buf + n, cap - n)) > 0) {
         n += r;
-        if (n == cap) { cap *= 2; buf = realloc(buf, cap); }
+        if (n == cap) {
+            cap *= 2;
+            uint8_t *tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); *len = 0; return NULL; }
+            buf = tmp;
+        }
     }
     *len = n;
     return buf;
@@ -55,6 +64,7 @@ int main(int argc, char **argv) {
     if (!text) text = read_stdin(&text_len);
     if (!text || text_len == 0) {
         fprintf(stderr, "usage: utterance [-f font.ttf] [file]\n       echo 'hello' | utterance\n");
+        free(text);
         return 1;
     }
 
@@ -73,7 +83,11 @@ int main(int argc, char **argv) {
     /* 3. Font */
     Font font;
     double t0 = glfwGetTime();
-    if (font_load(&font, font_path, 48.0f) < 0) return 1;
+    if (font_load(&font, font_path, 48.0f) < 0) {
+        free(text);
+        window_destroy(&win);
+        return 1;
+    }
     fprintf(stderr, "utterance: font loaded in %.2fs\n", glfwGetTime() - t0);
 
     /* 4. Layout */
@@ -88,10 +102,14 @@ int main(int argc, char **argv) {
     Camera cam;
     camera_init(&cam, 0.0f, 0.0f, 200.0f);
 
-    /* FPS counter — update once per second */
+    /* FPS counter */
     int fps_frames = 0;
     double fps_time = glfwGetTime();
     char fps_str[16] = "0 fps";
+    int fps_len = 5;
+
+    static const float text_color[3] = {0.85f, 0.9f, 0.95f};
+    static const float fps_color[3]  = {0.4f, 0.4f, 0.45f};
 
     /* Main loop */
     while (!window_should_close(&win)) {
@@ -116,8 +134,8 @@ int main(int argc, char **argv) {
 
         float dyaw = 0, dpitch = 0;
         if (win.mouse_captured) {
-            dyaw = (float)(win.mouse_x - win.last_mouse_x) * 0.002f;
-            dpitch = (float)(win.mouse_y - win.last_mouse_y) * 0.002f;
+            dyaw = (float)(win.mouse_x - win.last_mouse_x) * MOUSE_SENSITIVITY;
+            dpitch = (float)(win.mouse_y - win.last_mouse_y) * MOUSE_SENSITIVITY;
         }
 
         camera_update(&cam, dx, dy, dz, dyaw, dpitch);
@@ -131,20 +149,19 @@ int main(int argc, char **argv) {
         glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        float color[3] = {0.85f, 0.9f, 0.95f};
-        render_text(&mesh, &font, mvp, color);
+        render_text(&mesh, &font, mvp, text_color);
 
-        /* FPS overlay — top right, once per second */
+        /* FPS overlay — update text once per second */
         fps_frames++;
         double now = glfwGetTime();
         if (now - fps_time >= 1.0) {
-            snprintf(fps_str, sizeof(fps_str), "%d fps", fps_frames);
+            fps_len = snprintf(fps_str, sizeof(fps_str), "%d fps", fps_frames);
             fps_frames = 0;
             fps_time = now;
         }
         float fps_scale = 0.4f;
-        float fps_x = win.width - (float)strlen(fps_str) * font.glyphs[' '].advance * fps_scale - 10.0f;
-        float fps_color[3] = {0.4f, 0.4f, 0.45f};
+        float space_advance = font.glyphs[' '].present ? font.glyphs[' '].advance : font.px_size;
+        float fps_x = win.width - (float)fps_len * space_advance * fps_scale - 10.0f;
         render_overlay(&font, fps_str, fps_x, 10.0f, fps_scale, win.width, win.height, fps_color);
 
         window_swap(&win);
