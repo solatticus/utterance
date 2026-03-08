@@ -22,7 +22,7 @@ SDF font rendering. Full BMP atlas (codepoints 32–65535). OpenGL 3.3 core. FPS
 | Key | Action |
 |-----|--------|
 | **W/A/S/D** | Move (yes, like a real application) |
-| **Space / Ctrl** | Up / Down |
+| **Space / Alt** | Up / Down |
 | **Shift** | 5× speed, for when you have places to be |
 | **+/-** | Speed multiplier (stacks) |
 | **Scroll wheel** | Scroll vertically |

@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
         if (glfwGetKey(win.handle, GLFW_KEY_A) == GLFW_PRESS) { dx -= right[0]*sspeed; dy -= right[1]*sspeed; dz -= right[2]*sspeed; }
         if (glfwGetKey(win.handle, GLFW_KEY_D) == GLFW_PRESS) { dx += right[0]*sspeed; dy += right[1]*sspeed; dz += right[2]*sspeed; }
         if (glfwGetKey(win.handle, GLFW_KEY_SPACE) == GLFW_PRESS) dy += sspeed;
-        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) dy -= sspeed;
+        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_ALT) == GLFW_PRESS) dy -= sspeed;
 
         /* --- Selection: click-drag to select, click to blink --- */
         if (win.lmb_pressed) {
