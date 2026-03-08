@@ -58,9 +58,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 2. Window + GL */
+    /* 2. Window + GL — if no display, just be cat */
     Window win;
-    if (window_init(&win, 1920, 1080, "utterance") < 0) return 1;
+    if (window_init(&win, 1920, 1080, "utterance") < 0) {
+        fwrite(text, 1, text_len, stdout);
+        free(text);
+        return 0;
+    }
     gl_load_all();
 
     glEnable(GL_BLEND);
