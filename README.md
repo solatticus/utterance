@@ -80,6 +80,8 @@ Runtime: `libc` + `libm`. Runs on a Raspberry Pi 3. Runs on your 2011 ThinkPad. 
 
 `cat` prints. `less` scrolls. `ut` puts you in it.
 
+The approach here — C11, no frameworks, hand-rolled everything, minimal deps, runs anywhere — is the foundation for how we build terminal software in the collective. oscar.exe (the AI terminal client) follows the same principles: direct fd access, hand-built ANSI, dirty rectangle rendering, UTF-8 by hand. Utterance proved you don't need libraries to put text on a screen. You need a file descriptor and an opinion.
+
 ## License
 
 All rights reserved.
