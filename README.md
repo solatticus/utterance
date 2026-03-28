@@ -2,51 +2,56 @@
 
 `cat` prints. `less` scrolls. `ut` puts you inside it.
 
-Pipe any text into a 3D space and walk through it. SDF font rendering, FPS camera, blink teleport with post-processing, text selection with copy. **625KB**. Links `libc` and `libm`. Nothing else. Runs on a Raspberry Pi 3, a 2011 ThinkPad, whatever you forgot in that drawer. Falls back to `cat` when there's no display.
+Pipe any text into a 3D space and walk through it. Markdown rendered with color. ANSI codes painted. Code blocks boxed. Images loaded. Links clickable. Keyboard cursor like a real editor. **724KB**. Links `libc` and `libm`. Nothing else.
 
 ```
 echo 'hello world' | ut
 man bash | ut
 dmesg | ut
-journalctl -b | ut
-cat war_and_peace.txt | ut
+cat README.md | ut
 ut -f /path/to/font.ttf somefile.c
+ut -m raw_markdown.txt
 ```
+
+Falls back to `cat` when there's no display. Invisible unless you have a render surface.
 
 ## What it does
 
-SDF font rendering. Full BMP atlas (codepoints 32–65535). OpenGL 3.3 core. FPS camera. You're inside the text. You fly through it. Select it. Copy it. That's the whole thing, and it's more than most text editors manage.
+Two-phase text layout inspired by Cheng Lou's [pretext](https://github.com/chenglou/pretext). Pretext proved that text layout can be split into **prepare** (segment + measure, once) and **layout** (line-break on cached widths, pure arithmetic). That architecture dropped straight into utterance's C/OpenGL pipeline — segment the UTF-8, cache glyph advances, then re-layout for free when the camera moves. The concepts mapped 1:1.
+
+- **SDF font rendering** — Full BMP atlas (codepoints 32–65535), `fwidth()` antialiasing, crisp at any distance
+- **ANSI color** — 8-color, 256-color, 24-bit RGB. Per-vertex color in the shader. `gcc 2>&1 | ut` just works
+- **Markdown** — Headers, bold, italic, code spans, fenced code blocks with background boxes, links, blockquotes, lists, tables, horizontal rules. Auto-detected from `.md` extension or content heuristic
+- **Images** — PNG/JPEG/GIF/BMP loaded with stb_image, rendered as textured quads in the text flow. Remote URLs fetched with curl
+- **Ctrl+click links** — Opens URLs in your browser via xdg-open
+- **Text cursor** — Arrow keys, Page Up/Down, Home/End, Ctrl+Home/End. Blinking caret. Shift+arrow for selection
+- **CJK breaking** — Per-character line breaks for Chinese, Japanese, Korean, fullwidth forms
+- **Soft-hyphen** — U+00AD breaks with visible hyphen at discretionary points
+- **Streaming** — Non-blocking source reads. `tail -f | ut` works — text materializes as it arrives
+- **Dynamic reflow** — Text re-wraps based on camera distance. Zoom in, columns narrow. Zoom out, they widen
+- **Blink teleport** — Click to fly. Four post-processing effects. Bounce-back when you miss
 
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| **W/A/S/D** | Move (yes, like a real application) |
+| **W/A/S/D** | Move |
 | **Space / Alt** | Up / Down |
-| **Shift** | 5× speed, for when you have places to be |
-| **+/-** | Speed multiplier (stacks) |
-| **Scroll wheel** | Scroll vertically |
-| **Right-click** | Mouselook |
-| **Left-click** | Blink — raycast teleport to where you click |
-| **Click + drag** | Select text |
+| **Arrow keys** | Text cursor navigation |
+| **Shift+Arrow** | Extend selection |
+| **Page Up/Down** | Scroll by page |
+| **Home/End** | Start/end of line (Ctrl: document) |
 | **Ctrl+C** | Copy selection to clipboard |
-| **F** | Blink — raycast teleport to crosshair |
-| **\\** | Cycle blink effects (vignette → tunnel → chromatic → scanline → off) |
+| **Ctrl+click** | Open link in browser |
+| **Shift** | 5× speed |
+| **+/-** | Speed multiplier |
+| **Scroll wheel** | Vertical scroll |
+| **Right-click** | Mouselook |
+| **Left-click** | Blink teleport (on text) / deselect (on empty) |
+| **Click + drag** | Select text |
+| **F** | Blink to crosshair |
+| **\\** | Cycle blink effects |
 | **Q / Esc** | Quit |
-
-## Blink
-
-Click on text or press F. You fly there. The camera auto-aims toward the hit point and lands at a comfortable reading distance (~25 lines visible). If there's text at the destination, you stop and the word glows briefly. If there isn't, you bounce back — because even the teleport has taste.
-
-Four post-processing effects, toggled with `\`:
-- **Vignette** — the screen literally blinks. Snap shut, hold black, smooth open. The metaphor writes itself.
-- **Tunnel** — radial speed lines. Demoscene called, they want royalties.
-- **Chromatic aberration** — RGB splits at the edges. Space had a bad day.
-- **Scanline wipe** — CRT resync sweep with phosphor tint. For the nostalgic and the correct.
-
-## Selection
-
-Click and drag to select text. Blue highlight behind the selected glyphs, one rect per line. Ctrl+C copies the selection (including whitespace) to your system clipboard. Click anywhere to clear.
 
 ## Building
 
@@ -54,33 +59,32 @@ Click and drag to select text. Blue highlight behind the selected glyphs, one re
 make
 ```
 
-That's the whole build system. One `Makefile`. If your project needs more than that, it's not a project, it's a lifestyle.
-
 ## Dependencies
 
 - GLFW3 (vendored, static)
 - stb_truetype.h (vendored)
+- stb_image.h (vendored)
 - OpenGL 3.3 core profile
-- A C compiler that isn't embarrassed to exist
+- curl (runtime, for remote images)
 
-Runtime: `libc` + `libm`. Runs on a Raspberry Pi 3. Runs on your 2011 ThinkPad. Runs on that GPU you forgot you had. Your Electron app could never.
+Runtime: `libc` + `libm`. 724KB. Runs on a Raspberry Pi 3.
 
-## Technical
+## Architecture
 
-- C11, hand-rolled GL loader (~30 functions, no GLEW, no GLAD, no committee)
-- SDF rendering with `fwidth()` antialiasing — crisp at any distance, any angle
-- 4096×4096 SDF atlas, lazy glyph rendering (only atlas what you see)
-- FBO post-processing pipeline for blink effects (one uber-shader, zero overhead when idle)
-- Camera unproject for mouse-to-world raycasting (blink targeting, text selection)
-- UTF-8 decoding, perspective + orthographic rendering, zero runtime allocations in the render loop
+The text pipeline is a port of [pretext](https://github.com/chenglou/pretext)'s two-phase model into C11/OpenGL:
 
-625K with four post-processing effects, an FBO pipeline, lazy glyph atlas, animated blink, word highlight, and text selection. Your `node_modules` is crying.
+```
+Source (file, pipe, streaming fd)
+  → Segment (UTF-8 → words, spaces, breaks, ANSI, CJK, soft-hyphens)
+  → Measure (sum glyph advances per segment, cached)
+  → Line-break (greedy on cached widths, pure arithmetic)
+  → Mesh (segments → GlyphInstances with per-vertex color)
+  → Render (SDF shader + image quads + highlight quads)
+```
 
-## Philosophy
+Prepare runs once. Layout re-runs on wrap-width change at negligible cost. Streaming appends new segments incrementally. The source buffer is never modified — `cat` fallback dumps raw bytes.
 
-`cat` prints. `less` scrolls. `ut` puts you in it.
-
-The approach here — C11, no frameworks, hand-rolled everything, minimal deps, runs anywhere — is the foundation for how we build terminal software in the collective. oscar.exe (the AI terminal client) follows the same principles: direct fd access, hand-built ANSI, dirty rectangle rendering, UTF-8 by hand. Utterance proved you don't need libraries to put text on a screen. You need a file descriptor and an opinion.
+Credit to Cheng Lou for [pretext](https://github.com/chenglou/pretext) — the prepare/layout split, segment-based analysis, and the proof that browser-grade text layout can be pure arithmetic over cached measurements. The research depth on CJK, Arabic, Thai, and emoji in that project is remarkable. Utterance takes those ideas and puts them in a 3D space you can walk through.
 
 ## License
 

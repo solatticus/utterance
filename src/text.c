@@ -391,6 +391,66 @@ int text_selection_rects(const TextMesh *mesh, int g0, int g1, float rects[][4],
     return n;
 }
 
+/* --- Cursor navigation --- */
+
+static float line_tol(const TextMesh *mesh, int idx) {
+    return mesh->instances[idx].h * 0.5f;
+}
+
+int text_line_start(const TextMesh *mesh, int idx) {
+    if (idx < 0 || idx >= mesh->count) return idx;
+    float y = mesh->instances[idx].y;
+    float tol = line_tol(mesh, idx);
+    int i = idx;
+    while (i > 0 && fabsf(mesh->instances[i - 1].y - y) < tol) i--;
+    return i;
+}
+
+int text_line_end(const TextMesh *mesh, int idx) {
+    if (idx < 0 || idx >= mesh->count) return idx;
+    float y = mesh->instances[idx].y;
+    float tol = line_tol(mesh, idx);
+    int i = idx;
+    while (i + 1 < mesh->count && fabsf(mesh->instances[i + 1].y - y) < tol) i++;
+    return i;
+}
+
+int text_line_up(const TextMesh *mesh, int idx, float target_x) {
+    if (idx < 0 || mesh->count == 0) return idx;
+    if (idx >= mesh->count) idx = mesh->count - 1;
+    int ls = text_line_start(mesh, idx);
+    if (ls == 0) return idx; /* already on first line */
+    /* Previous line ends at ls-1 */
+    int prev_end = ls - 1;
+    int prev_start = text_line_start(mesh, prev_end);
+    /* Find closest glyph to target_x on previous line */
+    float best = 1e30f;
+    int best_i = prev_start;
+    for (int i = prev_start; i <= prev_end; i++) {
+        float d = fabsf(mesh->instances[i].x - target_x);
+        if (d < best) { best = d; best_i = i; }
+    }
+    return best_i;
+}
+
+int text_line_down(const TextMesh *mesh, int idx, float target_x) {
+    if (idx < 0 || mesh->count == 0) return idx;
+    if (idx >= mesh->count) idx = mesh->count - 1;
+    int le = text_line_end(mesh, idx);
+    if (le >= mesh->count - 1) return idx; /* already on last line */
+    /* Next line starts at le+1 */
+    int next_start = le + 1;
+    int next_end = text_line_end(mesh, next_start);
+    /* Find closest glyph to target_x on next line */
+    float best = 1e30f;
+    int best_i = next_start;
+    for (int i = next_start; i <= next_end; i++) {
+        float d = fabsf(mesh->instances[i].x - target_x);
+        if (d < best) { best = d; best_i = i; }
+    }
+    return best_i;
+}
+
 void text_destroy(TextMesh *mesh) {
     if (mesh->vao) glDeleteVertexArrays(1, &mesh->vao);
     if (mesh->vbo) glDeleteBuffers(1, &mesh->vbo);

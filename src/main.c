@@ -21,6 +21,21 @@
 
 #define MOUSE_SENSITIVITY 0.002f
 
+/* --- Key event queue for cursor navigation with repeat --- */
+#define MAX_KEY_EVENTS 64
+static struct { int key; int action; int mods; } g_key_events[MAX_KEY_EVENTS];
+static int g_key_count = 0;
+
+static void key_callback(GLFWwindow *win, int key, int scancode, int action, int mods) {
+    (void)win; (void)scancode;
+    if (g_key_count < MAX_KEY_EVENTS && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+        g_key_events[g_key_count].key = key;
+        g_key_events[g_key_count].action = action;
+        g_key_events[g_key_count].mods = mods;
+        g_key_count++;
+    }
+}
+
 int main(int argc, char **argv) {
     /* 1. Parse args */
     const char *font_path = "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf";
@@ -98,6 +113,8 @@ int main(int argc, char **argv) {
     /* Markdown transform: -m flag, .md extension, or auto-detect */
     uint8_t *md_buf = NULL;
     MdImageList md_images = {0};
+    MdLinkList md_links = {0};
+    MdCodeBlockList md_codeblocks = {0};
     int is_markdown = force_markdown;
     if (!is_markdown && file_arg) {
         size_t flen = strlen(file_arg);
@@ -107,7 +124,8 @@ int main(int argc, char **argv) {
         is_markdown = markdown_detect(src.buf, src.len);
     if (is_markdown) {
         size_t md_len = 0;
-        md_buf = markdown_to_ansi(src.buf, src.len, &md_len, &md_images);
+        md_buf = markdown_to_ansi(src.buf, src.len, &md_len, &md_images,
+                                  &md_links, &md_codeblocks);
         if (md_buf) {
             free(src.buf);
             src.buf = md_buf;
@@ -135,6 +153,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     gl_load_all();
+    glfwSetKeyCallback(win.handle, key_callback);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -246,6 +265,11 @@ int main(int argc, char **argv) {
     double sel_down_x = 0, sel_down_y = 0;
     int prev_ctrl_c = GLFW_RELEASE;
     #define SEL_DRAG_THRESHOLD 5.0
+
+    /* Text cursor state */
+    int cursor_pos = -1;           /* glyph index, -1 = no cursor */
+    float cursor_blink = 0.0f;
+    float cursor_target_x = -1.0f; /* column memory for up/down */
 
     /* Main loop */
     while (!window_should_close(&win)) {
@@ -377,6 +401,105 @@ int main(int argc, char **argv) {
         }
         prev_ctrl_c = cur_ctrl_c;
 
+        /* --- Keyboard cursor navigation --- */
+        {
+            float line_h_nav = font.ascent - font.descent + font.line_gap;
+            int page_lines = 20;
+
+            for (int ki = 0; ki < g_key_count; ki++) {
+                int key = g_key_events[ki].key;
+                int mods = g_key_events[ki].mods;
+                int shift = (mods & GLFW_MOD_SHIFT) != 0;
+                int ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+                int old_cursor = cursor_pos;
+                int moved = 0;
+
+                if (cursor_pos < 0 && mesh.count > 0) cursor_pos = 0;
+                if (cursor_pos < 0) continue;
+
+                switch (key) {
+                case GLFW_KEY_LEFT:
+                    if (cursor_pos > 0) { cursor_pos--; moved = 1; }
+                    cursor_target_x = -1;
+                    break;
+                case GLFW_KEY_RIGHT:
+                    if (cursor_pos < mesh.count - 1) { cursor_pos++; moved = 1; }
+                    cursor_target_x = -1;
+                    break;
+                case GLFW_KEY_UP:
+                    if (cursor_target_x < 0 && cursor_pos < mesh.count)
+                        cursor_target_x = mesh.instances[cursor_pos].x;
+                    { int np = text_line_up(&mesh, cursor_pos, cursor_target_x);
+                      if (np != cursor_pos) { cursor_pos = np; moved = 1; } }
+                    break;
+                case GLFW_KEY_DOWN:
+                    if (cursor_target_x < 0 && cursor_pos < mesh.count)
+                        cursor_target_x = mesh.instances[cursor_pos].x;
+                    { int np = text_line_down(&mesh, cursor_pos, cursor_target_x);
+                      if (np != cursor_pos) { cursor_pos = np; moved = 1; } }
+                    break;
+                case GLFW_KEY_PAGE_UP:
+                    if (cursor_target_x < 0 && cursor_pos < mesh.count)
+                        cursor_target_x = mesh.instances[cursor_pos].x;
+                    for (int pl = 0; pl < page_lines; pl++) {
+                        int np = text_line_up(&mesh, cursor_pos, cursor_target_x);
+                        if (np == cursor_pos) break;
+                        cursor_pos = np;
+                    }
+                    moved = (cursor_pos != old_cursor);
+                    /* Also scroll camera */
+                    dy += line_h_nav * page_lines;
+                    break;
+                case GLFW_KEY_PAGE_DOWN:
+                    if (cursor_target_x < 0 && cursor_pos < mesh.count)
+                        cursor_target_x = mesh.instances[cursor_pos].x;
+                    for (int pl = 0; pl < page_lines; pl++) {
+                        int np = text_line_down(&mesh, cursor_pos, cursor_target_x);
+                        if (np == cursor_pos) break;
+                        cursor_pos = np;
+                    }
+                    moved = (cursor_pos != old_cursor);
+                    dy -= line_h_nav * page_lines;
+                    break;
+                case GLFW_KEY_HOME:
+                    if (ctrl) { cursor_pos = 0; }
+                    else { cursor_pos = text_line_start(&mesh, cursor_pos); }
+                    moved = (cursor_pos != old_cursor);
+                    cursor_target_x = -1;
+                    break;
+                case GLFW_KEY_END:
+                    if (ctrl) { cursor_pos = mesh.count > 0 ? mesh.count - 1 : 0; }
+                    else { cursor_pos = text_line_end(&mesh, cursor_pos); }
+                    moved = (cursor_pos != old_cursor);
+                    cursor_target_x = -1;
+                    break;
+                }
+
+                if (moved) {
+                    cursor_blink = 0.0f; /* reset blink on movement */
+                    if (shift) {
+                        /* Extend selection */
+                        if (sel_anchor < 0) sel_anchor = old_cursor;
+                        sel_cursor = cursor_pos;
+                        sel_active = (sel_anchor != sel_cursor);
+                    } else {
+                        /* Clear selection */
+                        sel_active = 0;
+                        sel_anchor = -1;
+                        sel_cursor = -1;
+                    }
+                }
+            }
+            g_key_count = 0;
+        }
+
+        /* Mouse click sets cursor position */
+        if (win.lmb_pressed && sel_anchor >= 0) {
+            cursor_pos = sel_anchor;
+            cursor_blink = 0.0f;
+            cursor_target_x = -1;
+        }
+
         /* Mouse-up: blink (click on text) or deselect (click on empty) */
         int click_blink = 0;
         float click_ray[3] = {0};
@@ -396,8 +519,30 @@ int main(int argc, char **argv) {
                     float hx = cam.pos[0] + ct * click_ray[0];
                     float hy = cam.pos[1] + ct * click_ray[1];
                     float line_h = font.ascent - font.descent + font.line_gap;
-                    if (text_hit_test(&mesh, hx, hy, line_h * 2.0f))
-                        click_blink = 1;
+                    if (text_hit_test(&mesh, hx, hy, line_h * 2.0f)) {
+                        /* Ctrl+click: open URL */
+                        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS &&
+                            md_links.count > 0) {
+                            int gi = text_glyph_at(&mesh, hx, hy);
+                            if (gi >= 0 && gi < mesh.count) {
+                                int off = mesh.instances[gi].text_offset;
+                                for (int li = 0; li < md_links.count; li++) {
+                                    if (off >= md_links.links[li].start_offset &&
+                                        off < md_links.links[li].end_offset) {
+                                        char cmd[2048];
+                                        snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
+                                                 md_links.links[li].url);
+                                        if (system(cmd) == 0)
+                                            fprintf(stderr, "utterance: opening %s\n",
+                                                    md_links.links[li].url);
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            click_blink = 1;
+                        }
+                    }
                 }
             }
         }
@@ -543,6 +688,28 @@ int main(int argc, char **argv) {
         glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        /* Code block backgrounds */
+        for (int cbi = 0; cbi < md_codeblocks.count; cbi++) {
+            MdCodeBlock *cb = &md_codeblocks.blocks[cbi];
+            float cbx0 = 1e30f, cby0 = 1e30f, cbx1 = -1e30f, cby1 = -1e30f;
+            for (int g = 0; g < mesh.count; g++) {
+                int off = mesh.instances[g].text_offset;
+                if (off >= cb->start_offset && off < cb->end_offset) {
+                    GlyphInstance *gi = &mesh.instances[g];
+                    if (gi->x < cbx0) cbx0 = gi->x;
+                    if (gi->y < cby0) cby0 = gi->y;
+                    if (gi->x + gi->w > cbx1) cbx1 = gi->x + gi->w;
+                    if (gi->y + gi->h > cby1) cby1 = gi->y + gi->h;
+                }
+            }
+            if (cbx0 < 1e29f) {
+                float pad = 8.0f;
+                float cbb[4] = { cbx0 - pad, cby0 - pad, cbx1 + pad, cby1 + pad };
+                static const float cb_color[3] = {0.12f, 0.12f, 0.16f};
+                render_highlight(mvp, cbb, cb_color, 0.9f);
+            }
+        }
+
         /* Selection highlight */
         if (sel_active && sel_anchor >= 0 && sel_cursor >= 0) {
             float sel_rects[256][4];
@@ -567,6 +734,20 @@ int main(int argc, char **argv) {
 
         render_text(&mesh, &font, mvp);
         image_render(&images, mvp);
+
+        /* Text cursor — blinking vertical bar */
+        if (cursor_pos >= 0 && cursor_pos < mesh.count) {
+            cursor_blink += win.dt;
+            if (cursor_blink > 1.0f) cursor_blink -= 1.0f;
+            if (cursor_blink < 0.53f) {
+                GlyphInstance *cg = &mesh.instances[cursor_pos];
+                float cb[4] = { cg->x - 1.0f, cg->y - 1.0f,
+                                cg->x + 1.5f, cg->y + cg->h + 1.0f };
+                static const float cursor_color[3] = {0.9f, 0.9f, 0.95f};
+                render_highlight(mvp, cb, cursor_color, 0.85f);
+            }
+        }
+
         fx_end(win.width, win.height, fx_progress);
 
         /* FPS overlay */
@@ -599,6 +780,8 @@ int main(int argc, char **argv) {
     prepared_text_destroy(&prepared);
     image_list_destroy(&images);
     image_destroy_renderer();
+    md_link_list_destroy(&md_links);
+    md_codeblock_list_destroy(&md_codeblocks);
     font_destroy(&font);
     fx_destroy();
     render_destroy();

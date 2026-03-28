@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <unistd.h>
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
@@ -97,20 +98,43 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
     char *resolved = resolve_path(path, base_dir);
     if (!resolved) return -1;
 
-    /* Skip URLs for now — only load local files */
+    /* Fetch remote URLs with curl → temp file */
+    char *tmp_path = NULL;
     if (strstr(resolved, "://")) {
-        fprintf(stderr, "utterance: skipping remote image: %s\n", resolved);
+        tmp_path = strdup("/tmp/utterance-img-XXXXXX");
+        int fd = mkstemp(tmp_path);
+        if (fd < 0) {
+            fprintf(stderr, "utterance: can't create temp file for image\n");
+            free(resolved); free(tmp_path);
+            return -1;
+        }
+        close(fd);
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd), "curl -sL -o '%s' '%s' 2>/dev/null", tmp_path, resolved);
+        int ret = system(cmd);
+        if (ret != 0) {
+            fprintf(stderr, "utterance: failed to fetch image: %s\n", resolved);
+            unlink(tmp_path);
+            free(resolved); free(tmp_path);
+            return -1;
+        }
+        fprintf(stderr, "utterance: fetched remote image: %s\n", resolved);
         free(resolved);
-        return -1;
+        resolved = tmp_path;
+        tmp_path = NULL;
     }
+
+    int is_temp = (strncmp(resolved, "/tmp/utterance-img-", 19) == 0);
 
     int w, h, channels;
     unsigned char *data = stbi_load(resolved, &w, &h, &channels, 4); /* force RGBA */
     if (!data) {
         fprintf(stderr, "utterance: can't load image: %s\n", resolved);
+        if (is_temp) unlink(resolved);
         free(resolved);
         return -1;
     }
+    if (is_temp) unlink(resolved);
     free(resolved);
 
     /* Create GL texture */

@@ -38,6 +38,12 @@ int  text_hit_test(const TextMesh *mesh, float x, float y, float radius);
 int  text_word_bounds(const TextMesh *mesh, const PreparedText *pt, float x, float y, float out[4]);
 int  text_glyph_at(const TextMesh *mesh, float x, float y);
 int  text_selection_rects(const TextMesh *mesh, int g0, int g1, float rects[][4], int max_rects);
+/* Cursor navigation */
+int  text_line_start(const TextMesh *mesh, int idx);
+int  text_line_end(const TextMesh *mesh, int idx);
+int  text_line_up(const TextMesh *mesh, int idx, float target_x);
+int  text_line_down(const TextMesh *mesh, int idx, float target_x);
+
 void text_destroy(TextMesh *mesh);
 void prepared_text_destroy(PreparedText *pt);
 

@@ -94,9 +94,27 @@ static void push_image(MdImageList *il, const char *alt, size_t alt_len,
     img->placeholder = placeholder;
 }
 
+static void push_link(MdLinkList *ll, const char *url, size_t url_len,
+                      int start_offset, int end_offset) {
+    if (!ll) return;
+    if (ll->count >= ll->capacity) {
+        int new_cap = ll->capacity ? ll->capacity * 2 : 16;
+        MdLink *tmp = realloc(ll->links, (size_t)new_cap * sizeof(MdLink));
+        if (!tmp) return;
+        ll->links = tmp;
+        ll->capacity = new_cap;
+    }
+    MdLink *lk = &ll->links[ll->count++];
+    lk->url = malloc(url_len + 1);
+    memcpy(lk->url, url, url_len);
+    lk->url[url_len] = '\0';
+    lk->start_offset = start_offset;
+    lk->end_offset = end_offset;
+}
+
 /* Process inline markdown: **bold**, *italic*, `code`, [link](url), ![img](path) */
 static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
-                        MdImageList *img_out) {
+                        MdImageList *img_out, MdLinkList *link_out) {
     while (p < end) {
         /* Image: ![alt](path) */
         if (*p == '!' && p + 1 < end && p[1] == '[') {
@@ -146,7 +164,7 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
             while (close + 1 < end && !(close[0] == marker && close[1] == marker)) close++;
             if (close + 1 < end) {
                 buf_str(out, MD_BOLD);
-                emit_inline(out, start, close, img_out);
+                emit_inline(out, start, close, img_out, link_out);
                 buf_str(out, RESET);
                 p = close + 2;
                 continue;
@@ -161,7 +179,7 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
             while (close < end && *close != marker) close++;
             if (close < end && close > start) {
                 buf_str(out, MD_ITALIC);
-                emit_inline(out, start, close, img_out);
+                emit_inline(out, start, close, img_out, link_out);
                 buf_str(out, RESET);
                 p = close + 1;
                 continue;
@@ -178,6 +196,7 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
                 const uint8_t *uclose = ustart;
                 while (uclose < end && *uclose != ')') uclose++;
                 if (uclose < end) {
+                    int link_start = (int)out->len;
                     buf_str(out, MD_LINK);
                     buf_push(out, tstart, (size_t)(tclose - tstart));
                     buf_str(out, RESET);
@@ -186,6 +205,9 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
                     buf_push(out, ustart, (size_t)(uclose - ustart));
                     buf_str(out, ")");
                     buf_str(out, RESET);
+                    int link_end = (int)out->len;
+                    push_link(link_out, (const char *)ustart,
+                              (size_t)(uclose - ustart), link_start, link_end);
                     p = uclose + 1;
                     continue;
                 }
@@ -211,15 +233,19 @@ static int is_table_sep(const uint8_t *p, const uint8_t *end) {
 }
 
 uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
-                          MdImageList *img_out) {
+                          MdImageList *img_out, MdLinkList *link_out,
+                          MdCodeBlockList *code_out) {
     Buf out;
     buf_init(&out);
     if (!out.buf) return NULL;
     if (img_out) { img_out->images = NULL; img_out->count = 0; img_out->capacity = 0; }
+    if (link_out) { link_out->links = NULL; link_out->count = 0; link_out->capacity = 0; }
+    if (code_out) { code_out->blocks = NULL; code_out->count = 0; code_out->capacity = 0; }
 
     const uint8_t *p = src;
     const uint8_t *end = src + src_len;
     int in_code_block = 0;
+    int code_block_start = 0;
 
     while (p < end) {
         const uint8_t *le = line_end(p, end);
@@ -228,10 +254,22 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
         /* Fenced code block: ``` */
         if (starts_with(p + sp, le, "```")) {
             if (in_code_block) {
+                /* Record code block region */
+                if (code_out) {
+                    if (code_out->count >= code_out->capacity) {
+                        int nc = code_out->capacity ? code_out->capacity * 2 : 8;
+                        code_out->blocks = realloc(code_out->blocks, (size_t)nc * sizeof(MdCodeBlock));
+                        code_out->capacity = nc;
+                    }
+                    code_out->blocks[code_out->count].start_offset = code_block_start;
+                    code_out->blocks[code_out->count].end_offset = (int)out.len;
+                    code_out->count++;
+                }
                 in_code_block = 0;
                 buf_str(&out, RESET);
             } else {
                 in_code_block = 1;
+                code_block_start = (int)out.len;
                 buf_str(&out, MD_CBLOCK);
             }
             p = le < end ? le + 1 : le;
@@ -240,6 +278,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
 
         if (in_code_block) {
             buf_str(&out, MD_CBLOCK);
+            buf_push(&out, "    ", 4); /* indent code blocks */
             buf_push(&out, p, (size_t)(le - p));
             buf_str(&out, RESET);
             if (le < end) buf_push(&out, "\n", 1);
@@ -262,7 +301,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
             if (level >= 1 && level <= 6 && lp + level < le && lp[level] == ' ') {
                 const char *colors[] = { H1, H2, H3, H4, H5, H6 };
                 buf_str(&out, colors[level - 1]);
-                emit_inline(&out, lp + level + 1, le, img_out);
+                emit_inline(&out, lp + level + 1, le, img_out, link_out);
                 buf_str(&out, RESET);
                 if (le < end) buf_push(&out, "\n", 1);
                 p = le < end ? le + 1 : le;
@@ -296,7 +335,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
             buf_str(&out, MD_QUOTE);
             buf_push(&out, "\xe2\x94\x82", 3);
             buf_push(&out, " ", 1);
-            emit_inline(&out, content, le, img_out);
+            emit_inline(&out, content, le, img_out, link_out);
             buf_str(&out, RESET);
             if (le < end) buf_push(&out, "\n", 1);
             p = le < end ? le + 1 : le;
@@ -309,7 +348,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
             buf_push(&out, "\xe2\x80\xa2", 3);
             buf_str(&out, RESET);
             buf_push(&out, " ", 1);
-            emit_inline(&out, lp + 2, le, img_out);
+            emit_inline(&out, lp + 2, le, img_out, link_out);
             if (le < end) buf_push(&out, "\n", 1);
             p = le < end ? le + 1 : le;
             continue;
@@ -324,7 +363,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
                 buf_push(&out, lp, (size_t)(np - lp + 1));
                 buf_str(&out, RESET);
                 buf_push(&out, " ", 1);
-                emit_inline(&out, np + 2, le, img_out);
+                emit_inline(&out, np + 2, le, img_out, link_out);
                 if (le < end) buf_push(&out, "\n", 1);
                 p = le < end ? le + 1 : le;
                 continue;
@@ -357,7 +396,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
                 while (ce > cs && ce[-1] == ' ') ce--;
                 buf_str(&out, style);
                 buf_push(&out, " ", 1);
-                emit_inline(&out, cs, ce, img_out);
+                emit_inline(&out, cs, ce, img_out, link_out);
                 buf_push(&out, " ", 1);
                 buf_str(&out, RESET);
                 buf_str(&out, MD_TABLE);
@@ -372,7 +411,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
         }
 
         /* Plain paragraph */
-        emit_inline(&out, lp, le, img_out);
+        emit_inline(&out, lp, le, img_out, link_out);
         if (le < end) buf_push(&out, "\n", 1);
         p = le < end ? le + 1 : le;
     }
@@ -418,4 +457,16 @@ void md_image_list_destroy(MdImageList *il) {
     }
     free(il->images);
     memset(il, 0, sizeof(*il));
+}
+
+void md_link_list_destroy(MdLinkList *ll) {
+    for (int i = 0; i < ll->count; i++)
+        free(ll->links[i].url);
+    free(ll->links);
+    memset(ll, 0, sizeof(*ll));
+}
+
+void md_codeblock_list_destroy(MdCodeBlockList *cl) {
+    free(cl->blocks);
+    memset(cl, 0, sizeof(*cl));
 }
