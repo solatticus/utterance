@@ -82,6 +82,10 @@ Source (file, pipe, streaming fd)
 
 Prepare runs once. Layout re-runs on wrap-width change at negligible cost. Streaming appends incrementally. The source buffer is never modified — `cat` fallback dumps raw bytes.
 
+## Acknowledgments
+
+The two-phase prepare/layout architecture is based on ideas from Cheng Lou's [pretext](https://github.com/chenglou/pretext) — a TypeScript library that proves text layout can be pure arithmetic over cached measurements. The segment-based analysis, greedy line-breaking on cached widths, and the separation of measurement from layout all trace back to that work. The research depth on CJK, Arabic, Thai, and emoji in pretext is remarkable and informed the internationalization approach here.
+
 ## License
 
 All rights reserved.
