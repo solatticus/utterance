@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #define GL_LOADER_IMPLEMENTATION
 #include "gl_loader.h"
 #include "window.h"
@@ -8,6 +9,8 @@
 #include "fx.h"
 #include "source.h"
 #include "markdown.h"
+#include "image.h"
+#include <libgen.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,6 +97,7 @@ int main(int argc, char **argv) {
 
     /* Markdown transform: -m flag, .md extension, or auto-detect */
     uint8_t *md_buf = NULL;
+    MdImageList md_images = {0};
     int is_markdown = force_markdown;
     if (!is_markdown && file_arg) {
         size_t flen = strlen(file_arg);
@@ -103,16 +107,24 @@ int main(int argc, char **argv) {
         is_markdown = markdown_detect(src.buf, src.len);
     if (is_markdown) {
         size_t md_len = 0;
-        md_buf = markdown_to_ansi(src.buf, src.len, &md_len);
+        md_buf = markdown_to_ansi(src.buf, src.len, &md_len, &md_images);
         if (md_buf) {
-            /* Replace source buffer with transformed markdown */
             free(src.buf);
             src.buf = md_buf;
             src.len = md_len;
             src.cap = md_len;
-            src.eof = 1;  /* no streaming for transformed markdown */
-            fprintf(stderr, "utterance: markdown detected, %zu bytes\n", md_len);
+            src.eof = 1;
+            fprintf(stderr, "utterance: markdown detected, %zu bytes, %d images\n",
+                    md_len, md_images.count);
         }
+    }
+
+    /* Resolve base directory for relative image paths */
+    char *base_dir = NULL;
+    if (file_arg) {
+        char *tmp = strdup(file_arg);
+        base_dir = strdup(dirname(tmp));
+        free(tmp);
     }
 
     /* 3. Window + GL — if no display, just be cat */
@@ -149,11 +161,52 @@ int main(int argc, char **argv) {
 
     /* 6. Renderer */
     render_init();
+    image_init_renderer();
     fx_init(win.width, win.height);
 
-    /* 7. Camera — start at top-left of text, pulled back */
+    /* 6b. Load images from markdown and place at placeholder positions */
+    ImageList images = {0};
+    if (md_images.count > 0) {
+        float line_h = font.ascent - font.descent + font.line_gap;
+        for (int i = 0; i < md_images.count; i++) {
+            int idx = image_load(&images, md_images.images[i].path, base_dir);
+            if (idx >= 0) {
+                Image *img = &images.items[idx];
+                /* Find the placeholder glyph's position in the mesh */
+                int ph_offset = md_images.images[i].placeholder;
+                for (int g = 0; g < mesh.count; g++) {
+                    if (mesh.instances[g].text_offset >= ph_offset) {
+                        /* Place image below this glyph, spanning the text width */
+                        float max_w = 600.0f; /* max image width in world units */
+                        float aspect = (float)img->width / (float)img->height;
+                        img->world_w = max_w < (aspect * line_h * 8) ? max_w : aspect * line_h * 8;
+                        img->world_h = img->world_w / aspect;
+                        img->world_x = mesh.instances[g].x;
+                        img->world_y = mesh.instances[g].y - img->world_h - line_h * 0.5f;
+                        img->placed = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        md_image_list_destroy(&md_images);
+    }
+    free(base_dir);
+
+    /* 7. Camera — start with ~15 readable lines centered on top portion */
     Camera cam;
-    camera_init(&cam, 0.0f, 0.0f, 200.0f);
+    {
+        float line_h = font.ascent - font.descent + font.line_gap;
+        float target_lines = 20.0f;
+        float half_fov_tan = 0.46631f; /* tan(25°) for 50° FOV */
+        float aspect = (float)win.width / (float)win.height;
+        float start_z = (target_lines * line_h) / (2.0f * half_fov_tan);
+        float start_y = -(target_lines * 0.25f) * line_h;
+        /* Center on the text: wrap width = 2 * z * tan * aspect * 0.9 */
+        float start_x = start_z * half_fov_tan * aspect * 0.9f;
+        camera_init(&cam, start_x, start_y, start_z);
+        cam.pitch = -0.06f; /* slight downward tilt — looking at the page */
+    }
 
     /* FPS counter */
     int fps_frames = 0;
@@ -324,7 +377,7 @@ int main(int argc, char **argv) {
         }
         prev_ctrl_c = cur_ctrl_c;
 
-        /* Mouse-up: blink (click) or finalize selection (drag) */
+        /* Mouse-up: blink (click on text) or deselect (click on empty) */
         int click_blink = 0;
         float click_ray[3] = {0};
         if (win.lmb_released) {
@@ -332,10 +385,20 @@ int main(int argc, char **argv) {
                 sel_dragging = 0;
             } else {
                 sel_active = 0;
-                click_blink = 1;
+                sel_anchor = -1;
+                sel_cursor = -1;
+                /* Only blink if click hits near a glyph */
                 float ndc_x = (float)(2.0 * win.mouse_x / win.width - 1.0);
                 float ndc_y = (float)(1.0 - 2.0 * win.mouse_y / win.height);
                 camera_screen_ray(&cam, ndc_x, ndc_y, click_ray);
+                float ct = (click_ray[2] != 0.0f) ? -cam.pos[2] / click_ray[2] : -1.0f;
+                if (ct > 0.0f) {
+                    float hx = cam.pos[0] + ct * click_ray[0];
+                    float hy = cam.pos[1] + ct * click_ray[1];
+                    float line_h = font.ascent - font.descent + font.line_gap;
+                    if (text_hit_test(&mesh, hx, hy, line_h * 2.0f))
+                        click_blink = 1;
+                }
             }
         }
 
@@ -503,6 +566,7 @@ int main(int argc, char **argv) {
         }
 
         render_text(&mesh, &font, mvp);
+        image_render(&images, mvp);
         fx_end(win.width, win.height, fx_progress);
 
         /* FPS overlay */
@@ -533,6 +597,8 @@ int main(int argc, char **argv) {
     /* Cleanup */
     text_destroy(&mesh);
     prepared_text_destroy(&prepared);
+    image_list_destroy(&images);
+    image_destroy_renderer();
     font_destroy(&font);
     fx_destroy();
     render_destroy();

@@ -5,13 +5,14 @@
 #define PI_F       3.14159265f
 #define HALF_PI_F  1.57079632f
 #define DEG60_RAD  1.04719755f
+#define DEG50_RAD  0.87266463f
 #define PITCH_LIMIT 1.5f
 
 void camera_init(Camera *c, float x, float y, float z) {
     c->pos[0] = x; c->pos[1] = y; c->pos[2] = z;
     c->yaw = -HALF_PI_F; /* looking down -Z */
     c->pitch = 0.0f;
-    c->fov = DEG60_RAD;
+    c->fov = DEG50_RAD;
     c->aspect = 16.0f / 9.0f;
     c->near = 0.1f;
     c->far = 10000.0f;

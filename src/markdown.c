@@ -23,6 +23,7 @@
 #define MD_HR       "\033[2;36m"   /* dim cyan */
 #define MD_TABLE    "\033[37m"     /* white */
 #define MD_THEAD    "\033[1;37m"   /* bold white */
+#define MD_IMG      "\033[38;5;141m" /* light purple for image placeholder */
 
 typedef struct {
     uint8_t *buf;
@@ -55,29 +56,74 @@ static int starts_with(const uint8_t *p, const uint8_t *end, const char *prefix)
     return memcmp(p, prefix, n) == 0;
 }
 
-/* Find end of current line, returns pointer to \n or end */
 static const uint8_t *line_end(const uint8_t *p, const uint8_t *end) {
     while (p < end && *p != '\n') p++;
     return p;
 }
 
-/* Count leading chars matching c */
 static int count_leading(const uint8_t *p, const uint8_t *end, char c) {
     int n = 0;
     while (p + n < end && p[n] == (uint8_t)c) n++;
     return n;
 }
 
-/* Skip leading whitespace, return count */
 static int skip_spaces(const uint8_t *p, const uint8_t *end) {
     int n = 0;
     while (p + n < end && (p[n] == ' ' || p[n] == '\t')) n++;
     return n;
 }
 
-/* Process inline markdown within a line: **bold**, *italic*, `code`, [link](url) */
-static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end) {
+/* Record an image reference */
+static void push_image(MdImageList *il, const char *alt, size_t alt_len,
+                       const char *path, size_t path_len, int placeholder) {
+    if (!il) return;
+    if (il->count >= il->capacity) {
+        int new_cap = il->capacity ? il->capacity * 2 : 8;
+        MdImage *tmp = realloc(il->images, (size_t)new_cap * sizeof(MdImage));
+        if (!tmp) return;
+        il->images = tmp;
+        il->capacity = new_cap;
+    }
+    MdImage *img = &il->images[il->count++];
+    img->alt = malloc(alt_len + 1);
+    memcpy(img->alt, alt, alt_len);
+    img->alt[alt_len] = '\0';
+    img->path = malloc(path_len + 1);
+    memcpy(img->path, path, path_len);
+    img->path[path_len] = '\0';
+    img->placeholder = placeholder;
+}
+
+/* Process inline markdown: **bold**, *italic*, `code`, [link](url), ![img](path) */
+static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end,
+                        MdImageList *img_out) {
     while (p < end) {
+        /* Image: ![alt](path) */
+        if (*p == '!' && p + 1 < end && p[1] == '[') {
+            const uint8_t *astart = p + 2;
+            const uint8_t *aclose = astart;
+            while (aclose < end && *aclose != ']') aclose++;
+            if (aclose < end && aclose + 1 < end && aclose[1] == '(') {
+                const uint8_t *pstart = aclose + 2;
+                const uint8_t *pclose = pstart;
+                while (pclose < end && *pclose != ')') pclose++;
+                if (pclose < end) {
+                    int placeholder = (int)out->len;
+                    buf_str(out, MD_IMG);
+                    buf_push(out, "\xe2\x96\xa3", 3); /* ▣ */
+                    buf_push(out, " ", 1);
+                    buf_push(out, astart, (size_t)(aclose - astart));
+                    buf_str(out, RESET);
+                    push_image(img_out,
+                               (const char *)astart, (size_t)(aclose - astart),
+                               (const char *)pstart, (size_t)(pclose - pstart),
+                               placeholder);
+                    p = pclose + 1;
+                    continue;
+                }
+            }
+        }
+
         /* Code span: `...` */
         if (*p == '`') {
             const uint8_t *start = p + 1;
@@ -100,7 +146,7 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end) {
             while (close + 1 < end && !(close[0] == marker && close[1] == marker)) close++;
             if (close + 1 < end) {
                 buf_str(out, MD_BOLD);
-                emit_inline(out, start, close);
+                emit_inline(out, start, close, img_out);
                 buf_str(out, RESET);
                 p = close + 2;
                 continue;
@@ -115,7 +161,7 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end) {
             while (close < end && *close != marker) close++;
             if (close < end && close > start) {
                 buf_str(out, MD_ITALIC);
-                emit_inline(out, start, close);
+                emit_inline(out, start, close, img_out);
                 buf_str(out, RESET);
                 p = close + 1;
                 continue;
@@ -146,13 +192,11 @@ static void emit_inline(Buf *out, const uint8_t *p, const uint8_t *end) {
             }
         }
 
-        /* Plain character */
         buf_push(out, p, 1);
         p++;
     }
 }
 
-/* Check if a line is a table separator (e.g. |---|---|) */
 static int is_table_sep(const uint8_t *p, const uint8_t *end) {
     int sp = skip_spaces(p, end);
     p += sp;
@@ -166,10 +210,12 @@ static int is_table_sep(const uint8_t *p, const uint8_t *end) {
     return has_dash;
 }
 
-uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
+uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len,
+                          MdImageList *img_out) {
     Buf out;
     buf_init(&out);
     if (!out.buf) return NULL;
+    if (img_out) { img_out->images = NULL; img_out->count = 0; img_out->capacity = 0; }
 
     const uint8_t *p = src;
     const uint8_t *end = src + src_len;
@@ -187,9 +233,7 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
             } else {
                 in_code_block = 1;
                 buf_str(&out, MD_CBLOCK);
-                /* Skip the ``` line content (language hint) */
             }
-            /* Advance past this line */
             p = le < end ? le + 1 : le;
             continue;
         }
@@ -212,21 +256,21 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
 
         const uint8_t *lp = p + sp;
 
-        /* Heading: # ... ###### */
+        /* Heading */
         if (*lp == '#') {
             int level = count_leading(lp, le, '#');
             if (level >= 1 && level <= 6 && lp + level < le && lp[level] == ' ') {
                 const char *colors[] = { H1, H2, H3, H4, H5, H6 };
                 buf_str(&out, colors[level - 1]);
-                emit_inline(&out, lp + level + 1, le);
+                emit_inline(&out, lp + level + 1, le, img_out);
                 buf_str(&out, RESET);
                 if (le < end) buf_push(&out, "\n", 1);
                 p = le < end ? le + 1 : le;
-                    continue;
+                continue;
             }
         }
 
-        /* Horizontal rule: --- or *** or ___ (3+ chars, optional spaces) */
+        /* Horizontal rule */
         {
             int dashes = 0, stars = 0, undscr = 0, other = 0;
             for (const uint8_t *c = lp; c < le; c++) {
@@ -237,42 +281,41 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
             }
             if (!other && (dashes >= 3 || stars >= 3 || undscr >= 3)) {
                 buf_str(&out, MD_HR);
-                /* Emit a visual horizontal rule */
-                for (int i = 0; i < 40; i++) buf_push(&out, "\xe2\x94\x80", 3); /* ─ */
+                for (int i = 0; i < 40; i++) buf_push(&out, "\xe2\x94\x80", 3);
                 buf_str(&out, RESET);
                 if (le < end) buf_push(&out, "\n", 1);
                 p = le < end ? le + 1 : le;
-                    continue;
+                continue;
             }
         }
 
-        /* Blockquote: > ... */
+        /* Blockquote */
         if (*lp == '>') {
             const uint8_t *content = lp + 1;
             if (content < le && *content == ' ') content++;
             buf_str(&out, MD_QUOTE);
-            buf_push(&out, "\xe2\x94\x82", 3); /* │ */
+            buf_push(&out, "\xe2\x94\x82", 3);
             buf_push(&out, " ", 1);
-            emit_inline(&out, content, le);
+            emit_inline(&out, content, le, img_out);
             buf_str(&out, RESET);
             if (le < end) buf_push(&out, "\n", 1);
             p = le < end ? le + 1 : le;
             continue;
         }
 
-        /* Unordered list: - item, * item, + item */
+        /* Unordered list */
         if ((*lp == '-' || *lp == '*' || *lp == '+') && lp + 1 < le && lp[1] == ' ') {
             buf_str(&out, MD_BULLET);
-            buf_push(&out, "\xe2\x80\xa2", 3); /* • */
+            buf_push(&out, "\xe2\x80\xa2", 3);
             buf_str(&out, RESET);
             buf_push(&out, " ", 1);
-            emit_inline(&out, lp + 2, le);
+            emit_inline(&out, lp + 2, le, img_out);
             if (le < end) buf_push(&out, "\n", 1);
             p = le < end ? le + 1 : le;
             continue;
         }
 
-        /* Ordered list: 1. item, 2. item, etc. */
+        /* Ordered list */
         if (*lp >= '0' && *lp <= '9') {
             const uint8_t *np = lp;
             while (np < le && *np >= '0' && *np <= '9') np++;
@@ -281,23 +324,19 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
                 buf_push(&out, lp, (size_t)(np - lp + 1));
                 buf_str(&out, RESET);
                 buf_push(&out, " ", 1);
-                emit_inline(&out, np + 2, le);
+                emit_inline(&out, np + 2, le, img_out);
                 if (le < end) buf_push(&out, "\n", 1);
-                p = le < end ? le + 1 : le;
-                    continue;
-            }
-        }
-
-        /* Table row: | ... | ... | */
-        if (*lp == '|') {
-            /* Check if this is a separator row */
-            if (is_table_sep(lp, le)) {
-                /* Skip separator — the header was already styled */
                 p = le < end ? le + 1 : le;
                 continue;
             }
+        }
 
-            /* Determine if this is a header row (next line is a separator) */
+        /* Table row */
+        if (*lp == '|') {
+            if (is_table_sep(lp, le)) {
+                p = le < end ? le + 1 : le;
+                continue;
+            }
             int is_header = 0;
             if (le < end) {
                 const uint8_t *next_line = le + 1;
@@ -305,33 +344,25 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
                 if (is_table_sep(next_line, next_le))
                     is_header = 1;
             }
-
             const char *style = is_header ? MD_THEAD : MD_TABLE;
-
-            /* Parse cells */
             const uint8_t *cp = lp + 1;
             buf_str(&out, MD_TABLE);
-            buf_push(&out, "\xe2\x94\x82", 3); /* │ */
+            buf_push(&out, "\xe2\x94\x82", 3);
             buf_str(&out, RESET);
-
             while (cp < le) {
                 const uint8_t *cell_end = cp;
                 while (cell_end < le && *cell_end != '|') cell_end++;
-
-                /* Trim whitespace from cell */
                 const uint8_t *cs = cp, *ce = cell_end;
                 while (cs < ce && *cs == ' ') cs++;
                 while (ce > cs && ce[-1] == ' ') ce--;
-
                 buf_str(&out, style);
                 buf_push(&out, " ", 1);
-                emit_inline(&out, cs, ce);
+                emit_inline(&out, cs, ce, img_out);
                 buf_push(&out, " ", 1);
                 buf_str(&out, RESET);
                 buf_str(&out, MD_TABLE);
-                buf_push(&out, "\xe2\x94\x82", 3); /* │ */
+                buf_push(&out, "\xe2\x94\x82", 3);
                 buf_str(&out, RESET);
-
                 if (cell_end < le) cp = cell_end + 1;
                 else break;
             }
@@ -340,8 +371,8 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
             continue;
         }
 
-        /* Plain paragraph: just emit with inline formatting */
-        emit_inline(&out, lp, le);
+        /* Plain paragraph */
+        emit_inline(&out, lp, le, img_out);
         if (le < end) buf_push(&out, "\n", 1);
         p = le < end ? le + 1 : le;
     }
@@ -351,7 +382,6 @@ uint8_t *markdown_to_ansi(const uint8_t *src, size_t src_len, size_t *out_len) {
 }
 
 int markdown_detect(const uint8_t *src, size_t len) {
-    /* Heuristic: scan first ~2KB for markdown patterns */
     size_t scan = len < 2048 ? len : 2048;
     const uint8_t *p = src;
     const uint8_t *end = src + scan;
@@ -370,7 +400,6 @@ int markdown_detect(const uint8_t *src, size_t len) {
         else if ((*lp == '-' || *lp == '*') && lp + 1 < le && lp[1] == ' ') score += 1;
         else if (*lp == '|') score += 2;
 
-        /* Check for inline markers */
         for (const uint8_t *c = lp; c + 1 < le; c++) {
             if (c[0] == '*' && c[1] == '*') { score += 1; break; }
             if (c[0] == '[' && memchr(c, ']', (size_t)(le - c))) { score += 1; break; }
@@ -380,4 +409,13 @@ int markdown_detect(const uint8_t *src, size_t len) {
         p = le < end ? le + 1 : le;
     }
     return score >= 4;
+}
+
+void md_image_list_destroy(MdImageList *il) {
+    for (int i = 0; i < il->count; i++) {
+        free(il->images[i].alt);
+        free(il->images[i].path);
+    }
+    free(il->images);
+    memset(il, 0, sizeof(*il));
 }

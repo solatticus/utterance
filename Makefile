@@ -4,7 +4,7 @@ CFLAGS   = -std=c11 -O2 -Wall -Wextra -Wpedantic \
 LDFLAGS  = -Lthird_party/glfw/build/src
 LDLIBS   = -lglfw3 -lGL -lX11 -lpthread -lm -ldl -lwayland-client
 
-SRC      = src/main.c src/window.c src/camera.c src/font.c src/text.c src/render.c src/fx.c src/segment.c src/linebreak.c src/source.c src/markdown.c
+SRC      = src/main.c src/window.c src/camera.c src/font.c src/text.c src/render.c src/fx.c src/segment.c src/linebreak.c src/source.c src/markdown.c src/image.c
 OBJ      = $(SRC:.c=.o)
 BIN      = utterance
 
