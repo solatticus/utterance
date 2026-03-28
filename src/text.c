@@ -17,65 +17,106 @@ static int push_instance(TextMesh *mesh, GlyphInstance *inst) {
     return 0;
 }
 
-void text_layout(TextMesh *mesh, Font *font, const uint8_t *text, size_t len, float wrap_width) {
+void text_prepare(PreparedText *pt, Font *font, const uint8_t *text, size_t len) {
+    memset(pt, 0, sizeof(*pt));
+    pt->text = text;
+    pt->text_len = len;
+    pt->wrap_width = -1.0f; /* force first layout */
+    segment_analyze(&pt->segs, text, len);
+    segment_measure(&pt->segs, font, text);
+}
+
+void text_layout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width) {
     memset(mesh, 0, sizeof(*mesh));
 
+    linebreak_run(&pt->lines, pt->segs.segs, pt->segs.count,
+                  wrap_width, font, pt->text);
+    pt->wrap_width = wrap_width;
+
     float line_height = font->ascent - font->descent + font->line_gap;
-    float cursor_x = 0.0f;
     float cursor_y = 0.0f;
-    float tab_width = font->glyphs[' '].present ? font->glyphs[' '].advance * 4.0f : font->px_size;
 
-    const uint8_t *p = text;
-    const uint8_t *end = text + len;
+    for (int li = 0; li < pt->lines.count; li++) {
+        Line *line = &pt->lines.lines[li];
+        float cursor_x = 0.0f;
 
-    while (p < end) {
-        const uint8_t *cp_start = p;
-        uint32_t cp = utf8_decode(&p, end);
-        if (cp == 0) break;
+        for (int si = line->seg_start; si < line->seg_end; si++) {
+            Segment *seg = &pt->segs.segs[si];
 
-        if (cp == '\n') {
-            cursor_x = 0.0f;
-            cursor_y -= line_height;
-            continue;
+            if (seg->kind == SEG_TAB) {
+                cursor_x += seg->width;
+                continue;
+            }
+            if (seg->kind == SEG_SPACE) {
+                cursor_x += seg->width;
+                continue;
+            }
+
+            /* SEG_WORD: emit individual glyphs */
+            const uint8_t *p = pt->text + seg->byte_start;
+            const uint8_t *end = p + seg->byte_len;
+
+            /* For overflow words wider than wrap, do character-level wrapping */
+            float seg_remaining = (wrap_width > 0) ? (wrap_width - cursor_x) : 0;
+            int do_char_wrap = (wrap_width > 0 && seg->width > wrap_width && seg_remaining >= 0);
+
+            while (p < end) {
+                const uint8_t *cp_start = p;
+                uint32_t cp = utf8_decode(&p, end);
+                if (cp == 0) break;
+
+                Glyph *g = font_glyph(font, cp);
+                if (!g) continue;
+
+                /* Character-level wrap for overflow words */
+                if (do_char_wrap && cursor_x + g->advance > wrap_width && cursor_x > 0) {
+                    cursor_x = 0.0f;
+                    cursor_y -= line_height;
+                }
+
+                if (g->width > 0 && g->height > 0) {
+                    GlyphInstance inst;
+                    inst.x = cursor_x + g->x_off;
+                    inst.y = cursor_y - g->y_off - g->height;
+                    inst.z = 0.0f;
+                    inst.w = g->width;
+                    inst.h = g->height;
+                    inst.s0 = g->s0;
+                    inst.t0 = g->t0;
+                    inst.s1 = g->s1;
+                    inst.t1 = g->t1;
+                    inst.text_offset = (int)(cp_start - pt->text);
+                    if (push_instance(mesh, &inst) < 0) return;
+                }
+                cursor_x += g->advance;
+            }
         }
-        if (cp == '\r') continue;
-        if (cp == '\t') {
-            cursor_x += tab_width;
-            continue;
-        }
 
-        Glyph *g = font_glyph(font, cp);
-        if (!g) continue;
-
-        /* Wrap */
-        if (wrap_width > 0 && cursor_x + g->advance > wrap_width) {
-            cursor_x = 0.0f;
-            cursor_y -= line_height;
-        }
-
-        /* Only emit a quad if glyph has a visible bitmap */
-        if (g->width > 0 && g->height > 0) {
-            GlyphInstance inst;
-            inst.x = cursor_x + g->x_off;
-            inst.y = cursor_y - g->y_off - g->height; /* flip Y: OpenGL up, font down */
-            inst.z = 0.0f;
-            inst.w = g->width;
-            inst.h = g->height;
-            inst.s0 = g->s0;
-            inst.t0 = g->t0;
-            inst.s1 = g->s1;
-            inst.t1 = g->t1;
-            inst.text_offset = (int)(cp_start - text);
-            if (push_instance(mesh, &inst) < 0) break; /* OOM */
-        }
-        cursor_x += g->advance;
+        cursor_y -= line_height;
     }
+}
+
+void text_relayout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width) {
+    /* Threshold: skip if wrap width barely changed */
+    float diff = wrap_width - pt->wrap_width;
+    if (diff < 0) diff = -diff;
+    if (diff < 1.0f) return;
+
+    /* Tear down old GPU resources */
+    if (mesh->vao) { glDeleteVertexArrays(1, &mesh->vao); mesh->vao = 0; }
+    if (mesh->vbo) { glDeleteBuffers(1, &mesh->vbo); mesh->vbo = 0; }
+    free(mesh->instances);
+    mesh->instances = NULL;
+    mesh->count = 0;
+    mesh->capacity = 0;
+
+    text_layout(mesh, pt, font, wrap_width);
+    text_upload(mesh);
 }
 
 void text_upload(TextMesh *mesh) {
     if (mesh->count == 0) return;
 
-    /* 6 vertices per quad (2 triangles), 5 floats each (x,y,z,u,v) */
     int verts_per_glyph = 6;
     int floats_per_vert = 5;
     size_t total_floats = (size_t)mesh->count * verts_per_glyph * floats_per_vert;
@@ -89,14 +130,12 @@ void text_upload(TextMesh *mesh) {
         float s0 = g->s0, t0 = g->t0, s1 = g->s1, t1 = g->t1;
 
         float *v = verts + i * verts_per_glyph * floats_per_vert;
-        /* Triangle 1 */
-        v[0]=x0; v[1]=y1; v[2]=z; v[3]=s0; v[4]=t0;    /* top-left */
-        v[5]=x0; v[6]=y0; v[7]=z; v[8]=s0; v[9]=t1;    /* bottom-left */
-        v[10]=x1; v[11]=y0; v[12]=z; v[13]=s1; v[14]=t1; /* bottom-right */
-        /* Triangle 2 */
-        v[15]=x0; v[16]=y1; v[17]=z; v[18]=s0; v[19]=t0;  /* top-left */
-        v[20]=x1; v[21]=y0; v[22]=z; v[23]=s1; v[24]=t1;  /* bottom-right */
-        v[25]=x1; v[26]=y1; v[27]=z; v[28]=s1; v[29]=t0;  /* top-right */
+        v[0]=x0; v[1]=y1; v[2]=z; v[3]=s0; v[4]=t0;
+        v[5]=x0; v[6]=y0; v[7]=z; v[8]=s0; v[9]=t1;
+        v[10]=x1; v[11]=y0; v[12]=z; v[13]=s1; v[14]=t1;
+        v[15]=x0; v[16]=y1; v[17]=z; v[18]=s0; v[19]=t0;
+        v[20]=x1; v[21]=y0; v[22]=z; v[23]=s1; v[24]=t1;
+        v[25]=x1; v[26]=y1; v[27]=z; v[28]=s1; v[29]=t0;
     }
 
     glGenVertexArrays(1, &mesh->vao);
@@ -104,12 +143,10 @@ void text_upload(TextMesh *mesh) {
 
     glGenBuffers(1, &mesh->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
-    glBufferData(GL_ARRAY_BUFFER, total_floats * sizeof(float), verts, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, total_floats * sizeof(float), verts, GL_DYNAMIC_DRAW);
 
-    /* pos: location 0 */
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, floats_per_vert * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
-    /* uv: location 1 */
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, floats_per_vert * sizeof(float), (void *)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
@@ -130,46 +167,45 @@ int text_hit_test(const TextMesh *mesh, float x, float y, float radius) {
     return 0;
 }
 
-int text_word_bounds(const TextMesh *mesh, float x, float y, float out[4]) {
-    /* Find closest glyph to (x,y) */
-    float best = 1e30f;
-    int hit = -1;
-    for (int i = 0; i < mesh->count; i++) {
-        GlyphInstance *g = &mesh->instances[i];
-        float cx = g->x + g->w * 0.5f;
-        float cy = g->y + g->h * 0.5f;
-        float d = (x - cx)*(x - cx) + (y - cy)*(y - cy);
-        if (d < best) { best = d; hit = i; }
-    }
+int text_word_bounds(const TextMesh *mesh, const PreparedText *pt, float x, float y, float out[4]) {
+    /* Find closest glyph */
+    int hit = text_glyph_at(mesh, x, y);
     if (hit < 0) return 0;
 
-    GlyphInstance *h = &mesh->instances[hit];
-    float line_y = h->y;
-    float line_tol = h->h * 0.5f; /* same-line tolerance */
+    int hit_offset = mesh->instances[hit].text_offset;
 
-    /* Expand left: find contiguous glyphs on same line */
-    int left = hit, right = hit;
-    for (int i = hit - 1; i >= 0; i--) {
-        GlyphInstance *g = &mesh->instances[i];
-        if (fabsf(g->y - line_y) > line_tol) break; /* different line */
-        float gap = mesh->instances[i+1].x - (g->x + g->w);
-        if (gap > g->w * 0.8f) break; /* word boundary (space-sized gap) */
-        left = i;
+    /* Find the SEG_WORD segment containing this byte offset */
+    int seg_idx = -1;
+    for (int i = 0; i < pt->segs.count; i++) {
+        Segment *s = &pt->segs.segs[i];
+        if (s->kind == SEG_WORD &&
+            hit_offset >= s->byte_start &&
+            hit_offset < s->byte_start + s->byte_len) {
+            seg_idx = i;
+            break;
+        }
     }
-    /* Expand right */
-    for (int i = hit + 1; i < mesh->count; i++) {
+    if (seg_idx < 0) return 0;
+
+    /* Find all glyphs belonging to this segment */
+    Segment *seg = &pt->segs.segs[seg_idx];
+    int seg_end = seg->byte_start + seg->byte_len;
+
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    for (int i = 0; i < mesh->count; i++) {
         GlyphInstance *g = &mesh->instances[i];
-        if (fabsf(g->y - line_y) > line_tol) break;
-        float gap = g->x - (mesh->instances[i-1].x + mesh->instances[i-1].w);
-        if (gap > g->w * 0.8f) break;
-        right = i;
+        if (g->text_offset >= seg->byte_start && g->text_offset < seg_end) {
+            if (g->x < x0) x0 = g->x;
+            if (g->y < y0) y0 = g->y;
+            if (g->x + g->w > x1) x1 = g->x + g->w;
+            if (g->y + g->h > y1) y1 = g->y + g->h;
+        }
     }
 
-    /* Compute bounds with small padding */
-    out[0] = mesh->instances[left].x - 2.0f;
-    out[1] = mesh->instances[left].y - 2.0f;
-    out[2] = mesh->instances[right].x + mesh->instances[right].w + 2.0f;
-    out[3] = mesh->instances[left].y + mesh->instances[left].h + 2.0f;
+    out[0] = x0 - 2.0f;
+    out[1] = y0 - 2.0f;
+    out[2] = x1 + 2.0f;
+    out[3] = y1 + 2.0f;
     return 1;
 }
 
@@ -203,7 +239,6 @@ int text_selection_rects(const TextMesh *mesh, int g0, int g1, float rects[][4],
     for (int i = lo + 1; i <= hi; i++) {
         GlyphInstance *g = &mesh->instances[i];
         if (fabsf(g->y - line_y) > tol) {
-            /* New line — emit current rect */
             if (n < max_rects) {
                 rects[n][0] = rx0; rects[n][1] = ry0;
                 rects[n][2] = rx1; rects[n][3] = ry1;
@@ -220,7 +255,6 @@ int text_selection_rects(const TextMesh *mesh, int g0, int g1, float rects[][4],
             if (g->y + g->h > ry1) ry1 = g->y + g->h;
         }
     }
-    /* Emit last rect */
     if (n < max_rects) {
         rects[n][0] = rx0; rects[n][1] = ry0;
         rects[n][2] = rx1; rects[n][3] = ry1;
@@ -234,4 +268,10 @@ void text_destroy(TextMesh *mesh) {
     if (mesh->vbo) glDeleteBuffers(1, &mesh->vbo);
     free(mesh->instances);
     memset(mesh, 0, sizeof(*mesh));
+}
+
+void prepared_text_destroy(PreparedText *pt) {
+    segment_list_destroy(&pt->segs);
+    line_list_destroy(&pt->lines);
+    memset(pt, 0, sizeof(*pt));
 }
