@@ -14,8 +14,8 @@ void camera_init(Camera *c, float x, float y, float z) {
     c->pitch = 0.0f;
     c->fov = DEG50_RAD;
     c->aspect = 16.0f / 9.0f;
-    c->near = 0.1f;
-    c->far = 10000.0f;
+    c->near_plane = 0.1f;
+    c->far_plane = 10000.0f;
 }
 
 void camera_forward(const Camera *c, float out[3]) {
@@ -92,7 +92,7 @@ void camera_mvp(const Camera *c, float out[16]) {
     camera_forward(c, fwd);
 
     float view[16], proj[16];
-    mat4_perspective(proj, c->fov, c->aspect, c->near, c->far);
+    mat4_perspective(proj, c->fov, c->aspect, c->near_plane, c->far_plane);
     mat4_look(view, c->pos, fwd, up);
     mat4_mul(out, proj, view);
 }
