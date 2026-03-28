@@ -212,19 +212,21 @@ int main(int argc, char **argv) {
     }
     free(base_dir);
 
-    /* 7. Camera — start with ~15 readable lines centered on top portion */
+    /* 7. Camera — text-editor framing: text fits viewport with margins */
     Camera cam;
+    float min_wrap_width;
     {
         float line_h = font.ascent - font.descent + font.line_gap;
-        float target_lines = 20.0f;
+        float target_lines = 26.5f;
         float half_fov_tan = 0.46631f; /* tan(25°) for 50° FOV */
         float aspect = (float)win.width / (float)win.height;
         float start_z = (target_lines * line_h) / (2.0f * half_fov_tan);
+        float half_w = start_z * half_fov_tan * aspect;
+        min_wrap_width = half_w * 2.0f * 0.85f; /* floor: never narrower than initial */
+        float start_x = min_wrap_width * 0.5f;  /* center text in viewport */
         float start_y = -(target_lines * 0.25f) * line_h;
-        /* Center on the text: wrap width = 2 * z * tan * aspect * 0.9 */
-        float start_x = start_z * half_fov_tan * aspect * 0.9f;
         camera_init(&cam, start_x, start_y, start_z);
-        cam.pitch = -0.06f; /* slight downward tilt — looking at the page */
+        cam.pitch = -0.06f;
     }
 
     /* FPS counter */
@@ -663,7 +665,8 @@ int main(int argc, char **argv) {
         /* --- Dynamic relayout based on camera distance --- */
         if (cam.pos[2] > 0.0f) {
             float half_w = cam.pos[2] * tanf(cam.fov / 2.0f) * cam.aspect;
-            float effective_wrap = half_w * 2.0f * 0.9f;
+            float effective_wrap = half_w * 2.0f * 0.85f;
+            if (effective_wrap < min_wrap_width) effective_wrap = min_wrap_width;
             text_relayout(&mesh, &prepared, &font, effective_wrap, text_color);
         }
 
@@ -679,8 +682,11 @@ int main(int argc, char **argv) {
             cam.aspect = (float)win.width / (float)win.height;
             if (cam.pos[2] > 0.0f) {
                 float half_w = cam.pos[2] * tanf(cam.fov / 2.0f) * cam.aspect;
-                float ew = half_w * 2.0f * 0.9f;
-                prepared.wrap_width = -1.0f; /* bypass threshold */
+                float ew = half_w * 2.0f * 0.85f;
+                if (ew < min_wrap_width) ew = min_wrap_width;
+                /* Update min_wrap for new window size */
+                min_wrap_width = ew;
+                prepared.wrap_width = -1.0f;
                 text_relayout(&mesh, &prepared, &font, ew, text_color);
             }
         }
