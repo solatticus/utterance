@@ -7,6 +7,7 @@
 #include "render.h"
 #include "fx.h"
 #include "source.h"
+#include "markdown.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,10 +22,13 @@ int main(int argc, char **argv) {
     /* 1. Parse args */
     const char *font_path = "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf";
     const char *file_arg = NULL;
+    int force_markdown = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             font_path = argv[++i];
+        } else if (strcmp(argv[i], "-m") == 0) {
+            force_markdown = 1;
         } else if (!file_arg) {
             file_arg = argv[i];
         }
@@ -83,9 +87,32 @@ int main(int argc, char **argv) {
     }
 
     if (!have_source || src.len == 0) {
-        fprintf(stderr, "usage: utterance [-f font.ttf] [file]\n       echo 'hello' | utterance\n");
+        fprintf(stderr, "usage: utterance [-f font.ttf] [-m] [file]\n       echo 'hello' | utterance\n");
         if (have_source) source_destroy(&src);
         return 1;
+    }
+
+    /* Markdown transform: -m flag, .md extension, or auto-detect */
+    uint8_t *md_buf = NULL;
+    int is_markdown = force_markdown;
+    if (!is_markdown && file_arg) {
+        size_t flen = strlen(file_arg);
+        if (flen > 3 && strcmp(file_arg + flen - 3, ".md") == 0) is_markdown = 1;
+    }
+    if (!is_markdown && src.eof)
+        is_markdown = markdown_detect(src.buf, src.len);
+    if (is_markdown) {
+        size_t md_len = 0;
+        md_buf = markdown_to_ansi(src.buf, src.len, &md_len);
+        if (md_buf) {
+            /* Replace source buffer with transformed markdown */
+            free(src.buf);
+            src.buf = md_buf;
+            src.len = md_len;
+            src.cap = md_len;
+            src.eof = 1;  /* no streaming for transformed markdown */
+            fprintf(stderr, "utterance: markdown detected, %zu bytes\n", md_len);
+        }
     }
 
     /* 3. Window + GL — if no display, just be cat */
@@ -111,11 +138,13 @@ int main(int argc, char **argv) {
     fprintf(stderr, "utterance: font loaded in %.2fs\n", glfwGetTime() - t0);
 
     /* 5. Prepare + Layout (two-phase) */
+    static const float text_color[3] = {0.85f, 0.9f, 0.95f};
+
     PreparedText prepared;
     text_prepare(&prepared, &font, src.buf, src.len);
 
     TextMesh mesh;
-    text_layout(&mesh, &prepared, &font, 0.0f);
+    text_layout(&mesh, &prepared, &font, 0.0f, text_color);
     text_upload(&mesh);
 
     /* 6. Renderer */
@@ -132,7 +161,6 @@ int main(int argc, char **argv) {
     char fps_str[16] = "0 fps";
     int fps_len = 5;
 
-    static const float text_color[3]      = {0.85f, 0.9f, 0.95f};
     static const float fps_color[3]       = {0.4f, 0.4f, 0.45f};
     static const float crosshair_color[3] = {0.6f, 0.6f, 0.65f};
     float speed_mult = 1.0f;
@@ -185,8 +213,7 @@ int main(int argc, char **argv) {
 
                 /* Force relayout */
                 prepared.wrap_width = -1.0f;
-                text_relayout(&mesh, &prepared, &font, prepared.wrap_width + 1.0f);
-                /* Recalculate with actual wrap width below */
+                text_relayout(&mesh, &prepared, &font, prepared.wrap_width + 1.0f, text_color);
             }
         }
 
@@ -429,7 +456,7 @@ int main(int argc, char **argv) {
         if (cam.pos[2] > 0.0f) {
             float half_w = cam.pos[2] * tanf(cam.fov / 2.0f) * cam.aspect;
             float effective_wrap = half_w * 2.0f * 0.9f;
-            text_relayout(&mesh, &prepared, &font, effective_wrap);
+            text_relayout(&mesh, &prepared, &font, effective_wrap, text_color);
         }
 
         float mvp[16];
@@ -475,7 +502,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        render_text(&mesh, &font, mvp, text_color);
+        render_text(&mesh, &font, mvp);
         fx_end(win.width, win.height, fx_progress);
 
         /* FPS overlay */

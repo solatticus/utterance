@@ -8,35 +8,41 @@ static const char *vert_src =
     "#version 330 core\n"
     "layout(location = 0) in vec3 a_pos;\n"
     "layout(location = 1) in vec2 a_uv;\n"
+    "layout(location = 2) in vec3 a_color;\n"
     "uniform mat4 u_mvp;\n"
     "out vec2 v_uv;\n"
+    "out vec3 v_color;\n"
     "void main() {\n"
     "    v_uv = a_uv;\n"
+    "    v_color = a_color;\n"
     "    gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
     "}\n";
 
 static const char *frag_src =
     "#version 330 core\n"
     "in vec2 v_uv;\n"
+    "in vec3 v_color;\n"
     "out vec4 frag_color;\n"
     "uniform sampler2D u_atlas;\n"
     "uniform vec3 u_color;\n"
+    "uniform int u_use_vcolor;\n"
     "void main() {\n"
     "    float dist = texture(u_atlas, v_uv).r;\n"
     "    float edge = 0.5;\n"
     "    float w = fwidth(dist);\n"
     "    float alpha = smoothstep(edge - w, edge + w, dist);\n"
     "    if (alpha < 0.01) discard;\n"
-    "    frag_color = vec4(u_color, alpha);\n"
+    "    vec3 col = u_use_vcolor != 0 ? v_color : u_color;\n"
+    "    frag_color = vec4(col, alpha);\n"
     "}\n";
 
 #define OVERLAY_MAX_CHARS 128
 #define OVERLAY_FLOATS_PER_GLYPH 30 /* 6 verts * 5 floats */
 
 static GLuint program;
-static GLint loc_mvp, loc_atlas, loc_color;
+static GLint loc_mvp, loc_atlas, loc_color, loc_use_vcolor;
 
-/* Persistent overlay GPU objects — allocated once at init */
+/* Persistent overlay GPU objects */
 static GLuint overlay_vao, overlay_vbo;
 
 static GLuint compile_shader(GLenum type, const char *src) {
@@ -77,8 +83,9 @@ void render_init(void) {
     loc_mvp = glGetUniformLocation(program, "u_mvp");
     loc_atlas = glGetUniformLocation(program, "u_atlas");
     loc_color = glGetUniformLocation(program, "u_color");
+    loc_use_vcolor = glGetUniformLocation(program, "u_use_vcolor");
 
-    /* Allocate persistent overlay VAO/VBO */
+    /* Allocate persistent overlay VAO/VBO (5 floats/vert — no color attrib) */
     glGenVertexArrays(1, &overlay_vao);
     glBindVertexArray(overlay_vao);
     glGenBuffers(1, &overlay_vbo);
@@ -90,16 +97,17 @@ void render_init(void) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
+    /* attrib 2 (color) not enabled — reads generic default (0,0,0) */
     glBindVertexArray(0);
 }
 
-void render_text(const TextMesh *mesh, const Font *font, const float mvp[16], const float color[3]) {
+void render_text(const TextMesh *mesh, const Font *font, const float mvp[16]) {
     if (mesh->count == 0) return;
 
     glUseProgram(program);
     glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, mvp);
     glUniform1i(loc_atlas, 0);
-    glUniform3f(loc_color, color[0], color[1], color[2]);
+    glUniform1i(loc_use_vcolor, 1);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, font->texture);
@@ -111,16 +119,14 @@ void render_text(const TextMesh *mesh, const Font *font, const float mvp[16], co
 
 void render_overlay(Font *font, const char *str, float x, float y, float scale,
                     int win_w, int win_h, const float color[3]) {
-    /* Build ortho projection: top-left origin, pixel coords */
     float ortho[16] = {0};
     ortho[0]  =  2.0f / win_w;
-    ortho[5]  = -2.0f / win_h;  /* flip Y: top = 0 */
+    ortho[5]  = -2.0f / win_h;
     ortho[10] = -1.0f;
     ortho[12] = -1.0f;
     ortho[13] =  1.0f;
     ortho[15] =  1.0f;
 
-    /* Layout glyphs into scratch buffer */
     static float verts[OVERLAY_MAX_CHARS * OVERLAY_FLOATS_PER_GLYPH];
     int n = 0;
     float cx = x, cy = y;
@@ -148,7 +154,6 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     }
     if (n == 0) return;
 
-    /* Upload vertices to persistent VBO */
     glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, n * OVERLAY_FLOATS_PER_GLYPH * sizeof(float), verts);
 
@@ -156,6 +161,7 @@ void render_overlay(Font *font, const char *str, float x, float y, float scale,
     glUniformMatrix4fv(loc_mvp, 1, GL_FALSE, ortho);
     glUniform1i(loc_atlas, 0);
     glUniform3f(loc_color, color[0], color[1], color[2]);
+    glUniform1i(loc_use_vcolor, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, font->texture);
 

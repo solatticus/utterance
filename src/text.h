@@ -12,6 +12,7 @@ typedef struct {
     float w, h;
     float s0, t0, s1, t1;
     int text_offset;    /* byte offset in source text */
+    float r, g, b;      /* per-glyph color (ANSI or default) */
 } GlyphInstance;
 
 typedef struct {
@@ -29,15 +30,9 @@ typedef struct {
     float          wrap_width;
 } PreparedText;
 
-/* Phase 1: analyze + measure (run once, or on new text) */
 void text_prepare(PreparedText *pt, Font *font, const uint8_t *text, size_t len);
-
-/* Phase 2: line-break + build mesh (cheap, re-run on wrap change) */
-void text_layout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width);
-
-/* Re-layout only if wrap_width changed. Handles re-upload. */
-void text_relayout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width);
-
+void text_layout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width, const float default_color[3]);
+void text_relayout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width, const float default_color[3]);
 void text_upload(TextMesh *mesh);
 int  text_hit_test(const TextMesh *mesh, float x, float y, float radius);
 int  text_word_bounds(const TextMesh *mesh, const PreparedText *pt, float x, float y, float out[4]);

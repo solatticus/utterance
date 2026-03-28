@@ -7,6 +7,8 @@ typedef struct {
     int   seg_start;
     int   seg_end;      /* one past last */
     float width;
+    int   has_hyphen;   /* line ends with a soft-hyphen break — emit visible '-' */
+    int   byte_offset;  /* byte offset into text for overflow sub-line start (0 = normal) */
 } Line;
 
 typedef struct {
@@ -15,9 +17,6 @@ typedef struct {
     int    capacity;
 } LineList;
 
-/* Greedy line-breaking on measured segments.
-   max_width <= 0 means no wrapping (one line per hard break).
-   text + font are needed only for character-level overflow breaking. */
 void linebreak_run(LineList *out, const Segment *segs, int seg_count,
                    float max_width, Font *font, const uint8_t *text);
 
