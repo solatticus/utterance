@@ -313,7 +313,7 @@ int main(int argc, char **argv) {
         prev_bslash = cur_bslash;
 
         /* Input */
-        float speed = 200.0f * speed_mult * win.dt;
+        float speed = 800.0f * speed_mult * win.dt;
         if (glfwGetKey(win.handle, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
             speed *= 5.0f;
 
@@ -611,7 +611,7 @@ int main(int argc, char **argv) {
 
         /* Animate blink */
         if (blink_phase > 0) {
-            float dur = (blink_phase == 1) ? 0.18f : 0.22f;
+            float dur = (blink_phase == 1) ? 0.12f : 0.15f;
             blink_t += win.dt / dur;
             if (blink_t > 1.0f) blink_t = 1.0f;
 
