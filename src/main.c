@@ -670,11 +670,19 @@ int main(int argc, char **argv) {
         float mvp[16];
         camera_mvp(&cam, mvp);
 
-        /* Render */
+        /* Render — handle resize */
         if (win.width != prev_fw || win.height != prev_fh) {
             fx_resize(win.width, win.height);
             prev_fw = win.width;
             prev_fh = win.height;
+            /* Force text relayout at new aspect ratio */
+            cam.aspect = (float)win.width / (float)win.height;
+            if (cam.pos[2] > 0.0f) {
+                float half_w = cam.pos[2] * tanf(cam.fov / 2.0f) * cam.aspect;
+                float ew = half_w * 2.0f * 0.9f;
+                prepared.wrap_width = -1.0f; /* bypass threshold */
+                text_relayout(&mesh, &prepared, &font, ew, text_color);
+            }
         }
 
         float fx_progress = 0.0f;
