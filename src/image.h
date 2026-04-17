@@ -27,8 +27,11 @@ typedef struct {
     int    capacity;
 } ImageList;
 
-/* Load an image file into a GL texture. Returns index in list, -1 on failure. */
-int image_load(ImageList *il, const char *path, const char *base_dir);
+/* Load an image file into a GL texture. Returns index in list, -1 on failure.
+ * svg_target_px_w: rasterization width for SVG sources (0 = default 2048).
+ * Higher values give a crisper raster when the SVG is the top-level view. */
+int image_load(ImageList *il, const char *path, const char *base_dir,
+               int svg_target_px_w);
 
 /* Render all placed images using a textured quad shader. */
 void image_render(const ImageList *il, const float mvp[16]);

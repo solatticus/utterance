@@ -2,6 +2,7 @@
 #define SVG_H
 
 #include "gl_loader.h"
+#include "scene.h"
 #include "text.h"
 
 /* One parsed <text> run from an SVG. Populated by svg_load; rendered by the
@@ -60,6 +61,23 @@ int  svg_load(const char *path, int target_px_w,
  * starts with an XML prolog declaring SVG, or an <svg ...> root. */
 int  svg_detect(const unsigned char *buf, int len);
 
+/* Build a Scene from an SVG file. Shapes get flattened + triangulated into
+ * SceneMesh nodes with world-space coords (Y flipped from SVG's y-down to
+ * the world's y-up convention). Text runs are extracted into out_texts (same
+ * structure svg_load produced) for the caller to feed into svg_build_text_mesh.
+ *
+ * Scratch buffers are reused across shapes so allocations are bounded by the
+ * high-water mark of any single shape, not the total shape count. The caller
+ * owns out_scene and out_texts and must destroy them when done.
+ *
+ * Returns 0 on success, nonzero on parse failure. On failure no scene nodes
+ * are appended and out_texts is left as-is. */
+int  svg_build_scene(const char *path,
+                     float extrusion_depth,
+                     Scene *out_scene,
+                     SvgTextList *out_texts,
+                     float *out_svg_w, float *out_svg_h);
+
 void svg_text_list_destroy(SvgTextList *tl);
 
 /* Build an SDF glyph mesh (in text.h terms) from an SvgTextList, mapping
@@ -69,6 +87,7 @@ void svg_text_list_destroy(SvgTextList *tl);
 void svg_build_text_mesh(TextMesh *mesh, SvgLinkList *links, Font *font,
                          const SvgTextList *texts,
                          float svg_w, float svg_h,
-                         float wx, float wy, float ww, float wh);
+                         float wx, float wy, float ww, float wh,
+                         float wz);
 
 #endif

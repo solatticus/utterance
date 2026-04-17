@@ -53,7 +53,10 @@
     X(GLenum, CheckFramebufferStatus, GLenum target) \
     X(void, DeleteFramebuffers, GLsizei n, const GLuint *framebuffers) \
     X(void, Uniform2f, GLint location, GLfloat v0, GLfloat v1) \
-    X(void, Uniform4f, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
+    X(void, Uniform4f, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) \
+    X(void, Uniform4fv, GLint location, GLsizei count, const GLfloat *value) \
+    X(void, GenerateMipmap, GLenum target) \
+    X(void, DrawElements, GLenum mode, GLsizei count, GLenum type, const void *indices)
 
 /* Declare function pointers as gl* */
 #define X(ret, name, ...) extern ret (APIENTRY *gl##name)(__VA_ARGS__);

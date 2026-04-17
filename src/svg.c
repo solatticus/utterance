@@ -652,7 +652,8 @@ int svg_load(const char *path, int target_px_w,
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                  flipped ? flipped : pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -689,6 +690,281 @@ int svg_load(const char *path, int target_px_w,
     return 0;
 }
 
+/* ---------------------------------------------------------------- scene build */
+
+#include "geom.h"
+
+/* nanosvg paint → SceneMaterial fill_rgba (we store fills and strokes as
+ * separate materials; each node references one). opacity applies on top. */
+static void unpack_color(unsigned int c, float opacity, float out[4]) {
+    out[0] = ((c >> 0)  & 0xff) / 255.0f;
+    out[1] = ((c >> 8)  & 0xff) / 255.0f;
+    out[2] = ((c >> 16) & 0xff) / 255.0f;
+    out[3] = ((c >> 24) & 0xff) / 255.0f * opacity;
+}
+
+/* Flatten a nanosvg NSVGpath into scratch as a polyline (y-flipped to world
+ * conventions: world_y = -svg_y). Appends to *scratch without clearing — caller
+ * resets *count before each path. */
+static void flatten_nsvg_path(NSVGpath *path, float flatness,
+                              GVec2 **scratch, uint32_t *count, uint32_t *cap) {
+    if (path->npts < 1) return;
+    GVec2 p0 = {path->pts[0], -path->pts[1]};
+    /* Emit starting point. */
+    if (*count >= *cap) {
+        uint32_t nc = *cap ? *cap * 2 : 128;
+        GVec2 *tmp = realloc(*scratch, (size_t)nc * sizeof(GVec2));
+        if (!tmp) return;
+        *scratch = tmp; *cap = nc;
+    }
+    (*scratch)[(*count)++] = p0;
+
+    for (int i = 0; i < path->npts - 1; i += 3) {
+        float *p = &path->pts[i * 2];
+        GVec2 c0 = {p[0], -p[1]};
+        GVec2 c1 = {p[2], -p[3]};
+        GVec2 c2 = {p[4], -p[5]};
+        GVec2 c3 = {p[6], -p[7]};
+        /* geom_flatten_cubic emits only interior subdivisions; we append c3
+         * manually afterwards so the polyline includes the endpoint. */
+        geom_flatten_cubic(c0, c1, c2, c3, flatness, scratch, count, cap);
+        if (*count >= *cap) {
+            uint32_t nc = *cap * 2;
+            GVec2 *tmp = realloc(*scratch, (size_t)nc * sizeof(GVec2));
+            if (!tmp) return;
+            *scratch = tmp; *cap = nc;
+        }
+        (*scratch)[(*count)++] = c3;
+    }
+}
+
+/* Grow a typed buffer to hold at least `need` elements. */
+#define ENSURE_CAP(buf, cap_var, need, type)                            \
+    do {                                                                \
+        if ((cap_var) < (uint32_t)(need)) {                             \
+            uint32_t _nc = (cap_var) ? (cap_var) : 64;                  \
+            while (_nc < (uint32_t)(need)) _nc *= 2;                    \
+            type *_tmp = realloc((buf), (size_t)_nc * sizeof(type));    \
+            if (!_tmp) return -1;                                       \
+            (buf) = _tmp;                                               \
+            (cap_var) = _nc;                                            \
+        }                                                               \
+    } while (0)
+
+int svg_build_scene(const char *path, float extrusion_depth,
+                    Scene *out_scene,
+                    SvgTextList *out_texts,
+                    float *out_svg_w, float *out_svg_h) {
+    if (!path || !out_scene) return -1;
+    int extrude = extrusion_depth > 0.0f;
+
+    NSVGimage *img = nsvgParseFromFile(path, "px", 96.0f);
+    if (!img) {
+        fprintf(stderr, "utterance: svg parse failed: %s\n", path);
+        return -1;
+    }
+    if (img->width <= 0 || img->height <= 0) {
+        fprintf(stderr, "utterance: svg has no dimensions: %s\n", path);
+        nsvgDelete(img);
+        return -1;
+    }
+
+    if (out_svg_w) *out_svg_w = img->width;
+    if (out_svg_h) *out_svg_h = img->height;
+
+    /* Flatness tolerance: scale-relative so curves look smooth at any zoom.
+     * 0.05% of the larger dim is a good balance between vertex count and
+     * visual fidelity; clamped to ≥0.25 so tiny SVGs don't over-subdivide. */
+    float flatness = (img->width > img->height ? img->width : img->height) * 0.0005f;
+    if (flatness < 0.25f) flatness = 0.25f;
+
+    /* Scratch buffers, reused across every shape + subpath. Allocated on
+     * first need, grown only to the high-water mark, freed once at exit. */
+    GVec2       *poly      = NULL; uint32_t poly_cap   = 0;
+    uint32_t    *tri_idx   = NULL; uint32_t tri_cap    = 0;
+    GVec2       *ribbon    = NULL; uint32_t ribbon_cap = 0;
+    uint32_t    *strip_idx = NULL; uint32_t strip_cap  = 0;
+    SceneVertex *verts     = NULL; uint32_t verts_cap  = 0;
+    GVec3       *ex_verts  = NULL; uint32_t ex_verts_cap = 0;
+    uint32_t    *ex_idx    = NULL; uint32_t ex_idx_cap   = 0;
+
+    int shape_count = 0, fill_nodes = 0, stroke_nodes = 0;
+
+    for (NSVGshape *shape = img->shapes; shape; shape = shape->next) {
+        if (!(shape->flags & NSVG_FLAGS_VISIBLE)) continue;
+        shape_count++;
+
+        float fill_rgba[4]   = {0}, stroke_rgba[4] = {0};
+        int has_fill   = (shape->fill.type   == NSVG_PAINT_COLOR);
+        int has_stroke = (shape->stroke.type == NSVG_PAINT_COLOR) && shape->strokeWidth > 0;
+        if (has_fill)   unpack_color(shape->fill.color,   shape->opacity, fill_rgba);
+        if (has_stroke) unpack_color(shape->stroke.color, shape->opacity, stroke_rgba);
+        if (has_fill   && fill_rgba[3]   < 0.001f) has_fill   = 0;
+        if (has_stroke && stroke_rgba[3] < 0.001f) has_stroke = 0;
+        if (!has_fill && !has_stroke) continue;
+
+        /* One material per shape for fill, one for stroke — cheap and
+         * enables later per-material draw batching. */
+        int fill_mat = -1, stroke_mat = -1;
+        if (has_fill) {
+            SceneMaterial m = {0};
+            memcpy(m.fill_rgba, fill_rgba, sizeof fill_rgba);
+            m.fill_rgba[3] = fill_rgba[3];
+            fill_mat = scene_add_material(out_scene, &m);
+        }
+        if (has_stroke) {
+            SceneMaterial m = {0};
+            memcpy(m.fill_rgba, stroke_rgba, sizeof stroke_rgba);
+            m.stroke_width = shape->strokeWidth;
+            stroke_mat = scene_add_material(out_scene, &m);
+        }
+
+        for (NSVGpath *pth = shape->paths; pth; pth = pth->next) {
+            uint32_t poly_count = 0;
+            flatten_nsvg_path(pth, flatness, &poly, &poly_count, &poly_cap);
+            if (poly_count < 2) continue;
+
+            /* --- Fill --- */
+            if (has_fill && poly_count >= 3) {
+                if (extrude) {
+                    /* Prism: 2n verts, 6*(n-2) cap tris + 6*n side tris. */
+                    uint32_t vneed = poly_count * 2;
+                    uint32_t ineed = 6 * (poly_count - 2) + 6 * poly_count;
+                    ENSURE_CAP(ex_verts, ex_verts_cap, vneed, GVec3);
+                    ENSURE_CAP(ex_idx,   ex_idx_cap,   ineed, uint32_t);
+                    uint32_t tcount = geom_extrude_polygon(poly, poly_count,
+                                                           extrusion_depth,
+                                                           ex_verts, ex_idx);
+                    if (tcount > 0) {
+                        ENSURE_CAP(verts, verts_cap, vneed, SceneVertex);
+                        for (uint32_t k = 0; k < vneed; k++) {
+                            SceneVertex v = {0};
+                            v.pos[0] = ex_verts[k].x;
+                            v.pos[1] = ex_verts[k].y;
+                            v.pos[2] = ex_verts[k].z;
+                            v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                            verts[k] = v;
+                        }
+                        int mid = scene_add_mesh(out_scene, verts, vneed,
+                                                 ex_idx, tcount * 3);
+                        SceneNode nd = {0};
+                        scene_mat_identity(nd.local_xform);
+                        nd.parent      = -1;
+                        nd.mesh_id     = mid;
+                        nd.material_id = fill_mat;
+                        nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                        nd.svg_elem    = SVG_ELEM_PATH;
+                        nd.depth       = extrusion_depth;
+                        scene_add_node(out_scene, &nd);
+                        fill_nodes++;
+                    }
+                } else {
+                    ENSURE_CAP(tri_idx, tri_cap, 3 * (poly_count - 2), uint32_t);
+                    uint32_t tcount = geom_triangulate(poly, poly_count, tri_idx);
+                    if (tcount > 0) {
+                        ENSURE_CAP(verts, verts_cap, poly_count, SceneVertex);
+                        for (uint32_t k = 0; k < poly_count; k++) {
+                            SceneVertex v = {0};
+                            v.pos[0] = poly[k].x;
+                            v.pos[1] = poly[k].y;
+                            v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                            verts[k] = v;
+                        }
+                        int mid = scene_add_mesh(out_scene, verts, poly_count,
+                                                 tri_idx, tcount * 3);
+                        SceneNode nd = {0};
+                        scene_mat_identity(nd.local_xform);
+                        nd.parent      = -1;
+                        nd.mesh_id     = mid;
+                        nd.material_id = fill_mat;
+                        nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                        nd.svg_elem    = SVG_ELEM_PATH;
+                        scene_add_node(out_scene, &nd);
+                        fill_nodes++;
+                    }
+                }
+            }
+
+            /* --- Stroke --- */
+            if (has_stroke) {
+                uint32_t rv_count = poly_count * 2;
+                ENSURE_CAP(ribbon, ribbon_cap, rv_count, GVec2);
+                geom_stroke_ribbon(poly, poly_count, shape->strokeWidth * 0.5f,
+                                   pth->closed, ribbon);
+
+                uint32_t seg_count = poly_count - 1;
+                if (pth->closed) seg_count = poly_count;
+                uint32_t need_idx = seg_count * 6;
+
+                ENSURE_CAP(verts,     verts_cap, rv_count,  SceneVertex);
+                ENSURE_CAP(strip_idx, strip_cap, need_idx, uint32_t);
+
+                float stroke_z = extrude ? extrusion_depth + 0.5f : 0.0f;
+                for (uint32_t k = 0; k < rv_count; k++) {
+                    SceneVertex v = {0};
+                    v.pos[0] = ribbon[k].x;
+                    v.pos[1] = ribbon[k].y;
+                    v.pos[2] = stroke_z;
+                    v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                    verts[k] = v;
+                }
+                uint32_t ic = 0;
+                for (uint32_t i = 0; i < seg_count; i++) {
+                    uint32_t a = (i * 2) % rv_count;
+                    uint32_t b = (i * 2 + 1) % rv_count;
+                    uint32_t c = ((i + 1) * 2) % rv_count;
+                    uint32_t d = ((i + 1) * 2 + 1) % rv_count;
+                    strip_idx[ic++] = a; strip_idx[ic++] = b; strip_idx[ic++] = c;
+                    strip_idx[ic++] = b; strip_idx[ic++] = d; strip_idx[ic++] = c;
+                }
+                int mid = scene_add_mesh(out_scene, verts, rv_count,
+                                         strip_idx, ic);
+                SceneNode nd = {0};
+                scene_mat_identity(nd.local_xform);
+                nd.parent      = -1;
+                nd.mesh_id     = mid;
+                nd.material_id = stroke_mat;
+                nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                nd.svg_elem    = SVG_ELEM_PATH;
+                scene_add_node(out_scene, &nd);
+                stroke_nodes++;
+            }
+        }
+    }
+
+    free(poly);
+    free(tri_idx);
+    free(ribbon);
+    free(strip_idx);
+    free(verts);
+    free(ex_verts);
+    free(ex_idx);
+
+    if (extrude) out_scene->depth_enabled = 1;
+
+    float svg_w_final = img->width;
+    float svg_h_final = img->height;
+    nsvgDelete(img);
+
+    fprintf(stderr, "utterance: scene built — %d shapes, %d fill + %d stroke nodes, %u verts\n",
+            shape_count, fill_nodes, stroke_nodes, out_scene->vert_count);
+
+    /* Text extraction — mirrors svg_load's second pass. */
+    if (out_texts) {
+        size_t file_len = 0;
+        char *file_buf = slurp(path, &file_len);
+        if (file_buf) {
+            Mat23 root = extract_root_transform(file_buf, file_len);
+            extract_text_elements(file_buf, file_len, root, out_texts);
+            free(file_buf);
+            fprintf(stderr, "utterance: parsed %d <text> elements (viewbox %.0fx%.0f)\n",
+                    out_texts->count, svg_w_final, svg_h_final);
+        }
+    }
+
+    return 0;
+}
+
 /* ---------------------------------------------------------------- mesh build */
 
 /* Measure the total advance width of a UTF-8 string in font pixel units. */
@@ -708,7 +984,8 @@ static float measure_utf8_advance(Font *font, const char *utf8) {
 void svg_build_text_mesh(TextMesh *mesh, SvgLinkList *links, Font *font,
                          const SvgTextList *texts,
                          float svg_w, float svg_h,
-                         float wx, float wy, float ww, float wh) {
+                         float wx, float wy, float ww, float wh,
+                         float wz) {
     if (!mesh || !font || !texts || svg_w <= 0 || svg_h <= 0 || ww <= 0 || wh <= 0)
         return;
 
@@ -769,7 +1046,7 @@ void svg_build_text_mesh(TextMesh *mesh, SvgLinkList *links, Font *font,
                 GlyphInstance inst;
                 inst.x = origin_x + nx * font_scale;
                 inst.y = origin_y + ny * font_scale;
-                inst.z = 0.0f;
+                inst.z = wz;
                 inst.w = nw * font_scale;
                 inst.h = nh * font_scale;
                 inst.s0 = g->s0; inst.t0 = g->t0;

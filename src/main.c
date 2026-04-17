@@ -10,6 +10,7 @@
 #include "source.h"
 #include "markdown.h"
 #include "image.h"
+#include "scene.h"
 #include "svg.h"
 #include <libgen.h>
 
@@ -42,12 +43,16 @@ int main(int argc, char **argv) {
     const char *font_path = "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf";
     const char *file_arg = NULL;
     int force_markdown = 0;
+    float extrusion_depth = 0.0f; /* 0 = flat; >0 extrudes svg fills along +z */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             font_path = argv[++i];
         } else if (strcmp(argv[i], "-m") == 0) {
             force_markdown = 1;
+        } else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
+            extrusion_depth = (float)strtod(argv[++i], NULL);
+            if (extrusion_depth < 0.0f) extrusion_depth = 0.0f;
         } else if (!file_arg) {
             file_arg = argv[i];
         }
@@ -106,7 +111,7 @@ int main(int argc, char **argv) {
     }
 
     if (!have_source || src.len == 0) {
-        fprintf(stderr, "usage: utterance [-f font.ttf] [-m] [file]\n       echo 'hello' | utterance\n");
+        fprintf(stderr, "usage: utterance [-f font.ttf] [-m] [-e DEPTH] [file]\n       echo 'hello' | utterance\n");
         if (have_source) source_destroy(&src);
         return 1;
     }
@@ -123,6 +128,34 @@ int main(int argc, char **argv) {
     }
     if (!is_markdown && src.eof)
         is_markdown = markdown_detect(src.buf, src.len);
+
+    /* SVG file (by extension or content sniff): render via scene graph —
+     * flatten/triangulate paths into GL geometry, extract text runs into SDF
+     * mesh. Neutralize src so the text pipeline runs on empty content and
+     * all the text-editor features no-op gracefully. */
+    int standalone_svg = 0;
+    char *svg_file_path = NULL;
+    if (!is_markdown && file_arg) {
+        size_t flen = strlen(file_arg);
+        int is_svg_file = (flen > 4 &&
+            (file_arg[flen-4] == '.') &&
+            (file_arg[flen-3] == 's' || file_arg[flen-3] == 'S') &&
+            (file_arg[flen-2] == 'v' || file_arg[flen-2] == 'V') &&
+            (file_arg[flen-1] == 'g' || file_arg[flen-1] == 'G'));
+        if (!is_svg_file && src.len > 0) {
+            size_t sniff_n = src.len < 256 ? src.len : 256;
+            is_svg_file = svg_detect(src.buf, (int)sniff_n);
+        }
+        if (is_svg_file) {
+            svg_file_path = strdup(file_arg);
+            standalone_svg = 1;
+            free(src.buf);
+            src.buf = calloc(1, 1);
+            src.len = 0;
+            src.cap = 1;
+            src.eof = 1;
+        }
+    }
     if (is_markdown) {
         size_t md_len = 0;
         md_buf = markdown_to_ansi(src.buf, src.len, &md_len, &md_images,
@@ -184,27 +217,78 @@ int main(int argc, char **argv) {
     image_init_renderer();
     fx_init(win.width, win.height);
 
+    /* 6a. Standalone SVG → scene graph. Flatten paths into triangulated
+     * meshes, extract text runs, build the SDF mesh in the same world
+     * frame. The scene persists until shutdown — no per-frame rebuilds. */
+    Scene      svg_scene      = {0};
+    SvgTextList svg_scene_texts = {0};
+    TextMesh    svg_scene_text_mesh = {0};
+    SvgLinkList svg_scene_links = {0};
+    int have_svg_scene = 0;
+    if (standalone_svg && svg_file_path) {
+        scene_init(&svg_scene);
+        float svg_w = 0, svg_h = 0;
+        if (svg_build_scene(svg_file_path, extrusion_depth,
+                            &svg_scene, &svg_scene_texts,
+                            &svg_w, &svg_h) == 0) {
+            scene_bake_transforms(&svg_scene);
+            scene_compute_bounds(&svg_scene);
+            scene_upload(&svg_scene);
+            /* Text runs live in the SVG's own viewbox frame. Map them into
+             * world with y flipped (matches how scene verts were emitted). */
+            /* Lift text just above the front cap when extruded so the
+             * depth-tested scene doesn't occlude labels. 1.0 world unit is
+             * plenty — SVG text is rarely taller than a few tens of units. */
+            float text_z = extrusion_depth > 0 ? extrusion_depth + 1.0f : 0.0f;
+            svg_build_text_mesh(&svg_scene_text_mesh, &svg_scene_links,
+                                &font, &svg_scene_texts,
+                                svg_w, svg_h,
+                                0.0f, -svg_h, svg_w, svg_h, text_z);
+            text_upload(&svg_scene_text_mesh);
+            fprintf(stderr, "utterance: svg scene text mesh: %d glyphs, %d links\n",
+                    svg_scene_text_mesh.count, svg_scene_links.count);
+            have_svg_scene = 1;
+        } else {
+            scene_destroy(&svg_scene);
+        }
+    }
+
     /* 6b. Load images from markdown and place at placeholder positions */
     ImageList images = {0};
     if (md_images.count > 0) {
         float line_h = font.ascent - font.descent + font.line_gap;
         for (int i = 0; i < md_images.count; i++) {
-            int idx = image_load(&images, md_images.images[i].path, base_dir);
+            /* Standalone SVG wants a crisp high-res raster since it fills the
+             * viewport and users will zoom in. Markdown-embedded SVGs render
+             * at text-inline size, so the default is fine. */
+            int svg_target = standalone_svg ? 8192 : 0;
+            int idx = image_load(&images, md_images.images[i].path, base_dir,
+                                 svg_target);
             if (idx >= 0) {
                 Image *img = &images.items[idx];
-                /* Find the placeholder glyph's position in the mesh */
-                int ph_offset = md_images.images[i].placeholder;
-                for (int g = 0; g < mesh.count; g++) {
-                    if (mesh.instances[g].text_offset >= ph_offset) {
-                        /* Place image below this glyph, spanning the text width */
-                        float max_w = 600.0f; /* max image width in world units */
-                        float aspect = (float)img->width / (float)img->height;
-                        img->world_w = max_w < (aspect * line_h * 8) ? max_w : aspect * line_h * 8;
-                        img->world_h = img->world_w / aspect;
-                        img->world_x = mesh.instances[g].x;
-                        img->world_y = mesh.instances[g].y - img->world_h - line_h * 0.5f;
-                        img->placed = 1;
-                        break;
+                float aspect = (float)img->width / (float)img->height;
+                if (standalone_svg) {
+                    /* Fill the viewport: large world dims, centered at origin.
+                     * Camera framing below places us far enough to see it all. */
+                    img->world_h = 1600.0f;
+                    img->world_w = img->world_h * aspect;
+                    img->world_x = -img->world_w * 0.5f;
+                    img->world_y = -img->world_h * 0.5f;
+                    img->placed = 1;
+                } else {
+                    /* Find the placeholder glyph's position in the mesh */
+                    int ph_offset = md_images.images[i].placeholder;
+                    for (int g = 0; g < mesh.count; g++) {
+                        if (mesh.instances[g].text_offset >= ph_offset) {
+                            /* Place image below this glyph, spanning the text width */
+                            float max_w = 600.0f; /* max image width in world units */
+                            img->world_w = max_w < (aspect * line_h * 8) ? max_w : aspect * line_h * 8;
+                            img->world_h = img->world_w / aspect;
+                            img->world_x = mesh.instances[g].x;
+                            img->world_y = mesh.instances[g].y - img->world_h - line_h * 0.5f;
+                            img->placed = 1;
+                            break;
+                        }
                     }
                 }
                 /* For SVGs with extracted <text> runs, build an SDF mesh in
@@ -215,7 +299,7 @@ int main(int argc, char **argv) {
                                         &font, &img->texts,
                                         img->svg_view_w, img->svg_view_h,
                                         img->world_x, img->world_y,
-                                        img->world_w, img->world_h);
+                                        img->world_w, img->world_h, 0.0f);
                     text_upload(&img->svg_text_mesh);
                     fprintf(stderr, "utterance: built svg text mesh with %d glyphs, %d links\n",
                             img->svg_text_mesh.count, img->svg_links.count);
@@ -226,10 +310,27 @@ int main(int argc, char **argv) {
     }
     free(base_dir);
 
-    /* 7. Camera — text-editor framing: text fits viewport with margins */
+    /* 7. Camera — text-editor framing: text fits viewport with margins.
+     * Standalone SVG: frame the scene's world AABB instead. */
     Camera cam;
     float min_wrap_width;
-    {
+    if (have_svg_scene) {
+        float cx = (svg_scene.bounds_min[0] + svg_scene.bounds_max[0]) * 0.5f;
+        float cy = (svg_scene.bounds_min[1] + svg_scene.bounds_max[1]) * 0.5f;
+        float sw = svg_scene.bounds_max[0] - svg_scene.bounds_min[0];
+        float sh = svg_scene.bounds_max[1] - svg_scene.bounds_min[1];
+        float half_fov_tan = 0.46631f; /* tan(25°) for 50° FOV */
+        float aspect = (float)win.width / (float)win.height;
+        /* Fit whichever dim is the binding constraint, with 5% margin. */
+        float z_fit_h = (sh * 0.5f) / (half_fov_tan * 0.95f);
+        float z_fit_w = (sw * 0.5f) / (half_fov_tan * aspect * 0.95f);
+        float start_z = z_fit_h > z_fit_w ? z_fit_h : z_fit_w;
+        /* Push camera past the front cap when the scene has real z extent. */
+        start_z += svg_scene.bounds_max[2];
+        camera_init(&cam, cx, cy, start_z);
+        cam.pitch = 0.0f;
+        min_wrap_width = 0.0f;
+    } else {
         float line_h = font.ascent - font.descent + font.line_gap;
         float target_lines = 26.5f;
         float half_fov_tan = 0.46631f; /* tan(25°) for 50° FOV */
@@ -810,6 +911,13 @@ int main(int argc, char **argv) {
                 render_text(&img->svg_text_mesh, &font, mvp);
         }
 
+        /* Standalone SVG scene: shape meshes then SDF text on top. */
+        if (have_svg_scene) {
+            scene_render(&svg_scene, mvp);
+            if (svg_scene_text_mesh.count > 0)
+                render_text(&svg_scene_text_mesh, &font, mvp);
+        }
+
         /* Text cursor — blinking vertical bar */
         if (cursor_pos >= 0 && cursor_pos < mesh.count) {
             cursor_blink += win.dt;
@@ -857,6 +965,13 @@ int main(int argc, char **argv) {
     image_destroy_renderer();
     md_link_list_destroy(&md_links);
     md_codeblock_list_destroy(&md_codeblocks);
+    if (have_svg_scene) {
+        text_destroy(&svg_scene_text_mesh);
+        svg_link_list_destroy(&svg_scene_links);
+        svg_text_list_destroy(&svg_scene_texts);
+        scene_destroy(&svg_scene);
+    }
+    free(svg_file_path);
     font_destroy(&font);
     fx_destroy();
     render_destroy();

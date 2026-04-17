@@ -96,7 +96,8 @@ static char *resolve_path(const char *path, const char *base_dir) {
     return full;
 }
 
-int image_load(ImageList *il, const char *path, const char *base_dir) {
+int image_load(ImageList *il, const char *path, const char *base_dir,
+               int svg_target_px_w) {
     char *resolved = resolve_path(path, base_dir);
     if (!resolved) return -1;
 
@@ -149,7 +150,11 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
     SvgTextList texts = {0};
 
     if (sniff_is_svg) {
-        if (svg_load(resolved, 2048, &tex, &w, &h, &texts, &svg_w, &svg_h) != 0) {
+        /* 8192 is supported by every GL 3.3-capable GPU from the last decade;
+         * avoids needing a GL_MAX_TEXTURE_SIZE query through the loader. */
+        int svg_w_req = svg_target_px_w > 0 ? svg_target_px_w : 2048;
+        if (svg_w_req > 8192) svg_w_req = 8192;
+        if (svg_load(resolved, svg_w_req, &tex, &w, &h, &texts, &svg_w, &svg_h) != 0) {
             fprintf(stderr, "utterance: can't load svg: %s\n", resolved);
             if (is_temp) unlink(resolved);
             free(resolved);
