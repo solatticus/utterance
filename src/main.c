@@ -10,6 +10,7 @@
 #include "source.h"
 #include "markdown.h"
 #include "image.h"
+#include "svg.h"
 #include <libgen.h>
 
 #include <stdio.h>
@@ -205,6 +206,18 @@ int main(int argc, char **argv) {
                         img->placed = 1;
                         break;
                     }
+                }
+                /* For SVGs with extracted <text> runs, build an SDF mesh in
+                 * world space so labels render crisp through the native font
+                 * pipeline rather than the rasterized shape layer. */
+                if (img->placed && img->is_svg && img->texts.count > 0) {
+                    svg_build_text_mesh(&img->svg_text_mesh, &font, &img->texts,
+                                        img->svg_view_w, img->svg_view_h,
+                                        img->world_x, img->world_y,
+                                        img->world_w, img->world_h);
+                    text_upload(&img->svg_text_mesh);
+                    fprintf(stderr, "utterance: built svg text mesh with %d glyphs\n",
+                            img->svg_text_mesh.count);
                 }
             }
         }
@@ -748,6 +761,13 @@ int main(int argc, char **argv) {
 
         render_text(&mesh, &font, mvp);
         image_render(&images, mvp);
+        /* SVG labels: render each image's text mesh through the SDF pipeline
+         * so glyphs stay sharp at any zoom. */
+        for (int ii = 0; ii < images.count; ii++) {
+            Image *img = &images.items[ii];
+            if (img->placed && img->svg_text_mesh.count > 0)
+                render_text(&img->svg_text_mesh, &font, mvp);
+        }
 
         /* Text cursor — blinking vertical bar */
         if (cursor_pos >= 0 && cursor_pos < mesh.count) {

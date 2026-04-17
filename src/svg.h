@@ -2,6 +2,7 @@
 #define SVG_H
 
 #include "gl_loader.h"
+#include "text.h"
 
 /* One parsed <text> run from an SVG. Populated by svg_load; rendered by the
  * caller through the existing SDF glyph pipeline. */
@@ -43,5 +44,14 @@ int  svg_load(const char *path, int target_px_w,
 int  svg_detect(const unsigned char *buf, int len);
 
 void svg_text_list_destroy(SvgTextList *tl);
+
+/* Build an SDF glyph mesh (in text.h terms) from an SvgTextList, mapping
+ * each text run's SVG-space anchor point into world space using the image's
+ * bounding box. The mesh is populated with positioned GlyphInstances and the
+ * caller must run text_upload on it afterwards. */
+void svg_build_text_mesh(TextMesh *mesh, Font *font,
+                         const SvgTextList *texts,
+                         float svg_w, float svg_h,
+                         float wx, float wy, float ww, float wh);
 
 #endif

@@ -30,6 +30,10 @@ typedef struct {
     float          wrap_width;
 } PreparedText;
 
+/* Append a single already-positioned glyph to a mesh. Used by non-layout
+ * producers (SVG text extractor) that do their own positioning. */
+int  text_mesh_push(TextMesh *mesh, const GlyphInstance *inst);
+
 void text_prepare(PreparedText *pt, Font *font, const uint8_t *text, size_t len);
 void text_layout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width, const float default_color[3]);
 void text_relayout(TextMesh *mesh, PreparedText *pt, Font *font, float wrap_width, const float default_color[3]);

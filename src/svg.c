@@ -23,9 +23,11 @@
 #include "nanosvgrast.h"
 
 #include "svg.h"
+#include "utf8.h"
 
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -602,4 +604,90 @@ int svg_load(const char *path, int target_px_w,
     }
 
     return 0;
+}
+
+/* ---------------------------------------------------------------- mesh build */
+
+/* Measure the total advance width of a UTF-8 string in font pixel units. */
+static float measure_utf8_advance(Font *font, const char *utf8) {
+    const uint8_t *p = (const uint8_t *)utf8;
+    const uint8_t *end = p + strlen(utf8);
+    float adv = 0;
+    while (p < end) {
+        uint32_t cp = utf8_decode(&p, end);
+        if (cp == 0) break;
+        Glyph *g = font_glyph(font, cp);
+        if (g) adv += g->advance;
+    }
+    return adv;
+}
+
+void svg_build_text_mesh(TextMesh *mesh, Font *font,
+                         const SvgTextList *texts,
+                         float svg_w, float svg_h,
+                         float wx, float wy, float ww, float wh) {
+    if (!mesh || !font || !texts || svg_w <= 0 || svg_h <= 0 || ww <= 0 || wh <= 0)
+        return;
+
+    /* World units per SVG user unit. If the caller sized the image quad from
+     * (svg_w, svg_h) with preserved aspect, sx == sy. Use sx for horizontal
+     * advance (keeps letter proportions) and sy only for the Y coord map. */
+    float sx = ww / svg_w;
+    float sy = wh / svg_h;
+
+    for (int i = 0; i < texts->count; i++) {
+        const SvgText *t = &texts->items[i];
+        if (!t->utf8 || !t->utf8[0]) continue;
+
+        /* Glyphs are natively sized at font->px_size. Scale them to the SVG's
+         * requested font-size, then into world units. */
+        float font_scale = (t->font_size_px * sx) / font->px_size;
+        if (font_scale <= 0) continue;
+
+        /* SVG anchor → world. Flip Y: SVG is y-down, world is y-up. */
+        float origin_x = wx + t->x * sx;
+        float origin_y = wy + wh - t->y * sy;
+
+        /* text-anchor: shift origin by total advance so the run ends up in the
+         * right place. Measured in native font px, scaled by font_scale. */
+        if (t->anchor != 0) {
+            float total_adv = measure_utf8_advance(font, t->utf8) * font_scale;
+            if (t->anchor == 1)       origin_x -= total_adv * 0.5f;  /* middle */
+            else if (t->anchor == 2)  origin_x -= total_adv;         /* end */
+        }
+
+        const uint8_t *p = (const uint8_t *)t->utf8;
+        const uint8_t *end = p + strlen(t->utf8);
+        float cursor_x_native = 0.0f;
+
+        while (p < end) {
+            uint32_t cp = utf8_decode(&p, end);
+            if (cp == 0) break;
+            Glyph *g = font_glyph(font, cp);
+            if (!g) continue;
+
+            if (g->width > 0 && g->height > 0) {
+                /* Glyph quad in native font-px coords with baseline at y=0,
+                 * mirroring text.c's emit_glyph. */
+                float nx = cursor_x_native + g->x_off;
+                float ny = -g->y_off - g->height;
+                float nw = g->width;
+                float nh = g->height;
+
+                GlyphInstance inst;
+                inst.x = origin_x + nx * font_scale;
+                inst.y = origin_y + ny * font_scale;
+                inst.z = 0.0f;
+                inst.w = nw * font_scale;
+                inst.h = nh * font_scale;
+                inst.s0 = g->s0; inst.t0 = g->t0;
+                inst.s1 = g->s1; inst.t1 = g->t1;
+                inst.text_offset = -1;
+                inst.r = t->r; inst.g = t->g; inst.b = t->b;
+
+                text_mesh_push(mesh, &inst);
+            }
+            cursor_x_native += g->advance;
+        }
+    }
 }

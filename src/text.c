@@ -102,6 +102,18 @@ static void ansi_apply_sgr(AnsiState *state, const uint8_t *bytes, int len,
 
 /* ---- Mesh building ---- */
 
+int text_mesh_push(TextMesh *mesh, const GlyphInstance *inst) {
+    if (mesh->count >= mesh->capacity) {
+        int new_cap = mesh->capacity ? mesh->capacity * 2 : 256;
+        GlyphInstance *tmp = realloc(mesh->instances, (size_t)new_cap * sizeof(GlyphInstance));
+        if (!tmp) return -1;
+        mesh->instances = tmp;
+        mesh->capacity = new_cap;
+    }
+    mesh->instances[mesh->count++] = *inst;
+    return 0;
+}
+
 static int push_instance(TextMesh *mesh, GlyphInstance *inst) {
     if (mesh->count >= mesh->capacity) {
         int new_cap = mesh->capacity ? mesh->capacity * 2 : 4096;

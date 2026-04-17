@@ -8,6 +8,7 @@
 #include "stb_image.h"
 #include "image.h"
 #include "svg.h"
+#include "text.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -214,6 +215,7 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
     img->svg_view_w = svg_w;
     img->svg_view_h = svg_h;
     img->texts = texts;
+    memset(&img->svg_text_mesh, 0, sizeof(img->svg_text_mesh));
 
     fprintf(stderr, "utterance: loaded %s %dx%d\n", is_svg ? "svg" : "image", w, h);
     return idx;
@@ -265,6 +267,7 @@ void image_list_destroy(ImageList *il) {
         if (il->items[i].texture)
             glDeleteTextures(1, &il->items[i].texture);
         svg_text_list_destroy(&il->items[i].texts);
+        text_destroy(&il->items[i].svg_text_mesh);
     }
     free(il->items);
     memset(il, 0, sizeof(*il));

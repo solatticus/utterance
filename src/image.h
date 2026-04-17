@@ -3,6 +3,7 @@
 
 #include "gl_loader.h"
 #include "svg.h"
+#include "text.h"
 
 typedef struct {
     GLuint texture;
@@ -16,6 +17,7 @@ typedef struct {
     float       svg_view_w;    /* SVG viewBox width (user units) */
     float       svg_view_h;    /* SVG viewBox height */
     SvgTextList texts;         /* parsed <text> runs — rendered via SDF pipeline */
+    TextMesh    svg_text_mesh; /* SDF glyph mesh built from texts, in world space */
 } Image;
 
 typedef struct {
