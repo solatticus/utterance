@@ -7,6 +7,7 @@
 #define STBI_ONLY_BMP
 #include "stb_image.h"
 #include "image.h"
+#include "svg.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,43 +127,75 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
 
     int is_temp = (strncmp(resolved, "/tmp/utterance-img-", 19) == 0);
 
-    int w, h, channels;
-    unsigned char *data = stbi_load(resolved, &w, &h, &channels, 4); /* force RGBA */
-    if (!data) {
-        fprintf(stderr, "utterance: can't load image: %s\n", resolved);
-        if (is_temp) unlink(resolved);
-        free(resolved);
-        return -1;
+    /* Sniff the file header: SVG is XML-ish text, not a binary image, so
+     * stbi_load won't decode it. Peek at the first 256 bytes and route SVGs
+     * through the vector loader. */
+    int sniff_is_svg = 0;
+    {
+        FILE *f = fopen(resolved, "rb");
+        if (f) {
+            unsigned char buf[256];
+            size_t n = fread(buf, 1, sizeof(buf), f);
+            fclose(f);
+            if (svg_detect(buf, (int)n)) sniff_is_svg = 1;
+        }
+    }
+
+    GLuint tex = 0;
+    int w = 0, h = 0;
+    int is_svg = 0;
+    float svg_w = 0, svg_h = 0;
+    SvgTextList texts = {0};
+
+    if (sniff_is_svg) {
+        if (svg_load(resolved, 2048, &tex, &w, &h, &texts, &svg_w, &svg_h) != 0) {
+            fprintf(stderr, "utterance: can't load svg: %s\n", resolved);
+            if (is_temp) unlink(resolved);
+            free(resolved);
+            return -1;
+        }
+        is_svg = 1;
+    } else {
+        int channels;
+        unsigned char *data = stbi_load(resolved, &w, &h, &channels, 4); /* force RGBA */
+        if (!data) {
+            fprintf(stderr, "utterance: can't load image: %s\n", resolved);
+            if (is_temp) unlink(resolved);
+            free(resolved);
+            return -1;
+        }
+
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        /* Flip Y — stb loads top-down, OpenGL expects bottom-up */
+        unsigned char *flipped = malloc((size_t)w * h * 4);
+        if (flipped) {
+            for (int row = 0; row < h; row++)
+                memcpy(flipped + row * w * 4, data + (h - 1 - row) * w * 4, (size_t)w * 4);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, flipped);
+            free(flipped);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        stbi_image_free(data);
     }
     if (is_temp) unlink(resolved);
     free(resolved);
-
-    /* Create GL texture */
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    /* Flip Y — stb loads top-down, OpenGL expects bottom-up */
-    unsigned char *flipped = malloc((size_t)w * h * 4);
-    if (flipped) {
-        for (int row = 0; row < h; row++)
-            memcpy(flipped + row * w * 4, data + (h - 1 - row) * w * 4, (size_t)w * 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, flipped);
-        free(flipped);
-    } else {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    stbi_image_free(data);
 
     /* Add to list */
     if (il->count >= il->capacity) {
         int new_cap = il->capacity ? il->capacity * 2 : 8;
         Image *tmp = realloc(il->items, (size_t)new_cap * sizeof(Image));
-        if (!tmp) { glDeleteTextures(1, &tex); return -1; }
+        if (!tmp) {
+            glDeleteTextures(1, &tex);
+            svg_text_list_destroy(&texts);
+            return -1;
+        }
         il->items = tmp;
         il->capacity = new_cap;
     }
@@ -177,8 +210,12 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
     img->world_w = 0;
     img->world_h = 0;
     img->placed = 0;
+    img->is_svg = is_svg;
+    img->svg_view_w = svg_w;
+    img->svg_view_h = svg_h;
+    img->texts = texts;
 
-    fprintf(stderr, "utterance: loaded image %dx%d\n", w, h);
+    fprintf(stderr, "utterance: loaded %s %dx%d\n", is_svg ? "svg" : "image", w, h);
     return idx;
 }
 
@@ -227,6 +264,7 @@ void image_list_destroy(ImageList *il) {
     for (int i = 0; i < il->count; i++) {
         if (il->items[i].texture)
             glDeleteTextures(1, &il->items[i].texture);
+        svg_text_list_destroy(&il->items[i].texts);
     }
     free(il->items);
     memset(il, 0, sizeof(*il));

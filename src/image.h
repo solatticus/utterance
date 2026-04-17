@@ -2,6 +2,7 @@
 #define IMAGE_H
 
 #include "gl_loader.h"
+#include "svg.h"
 
 typedef struct {
     GLuint texture;
@@ -10,6 +11,11 @@ typedef struct {
     float  world_x, world_y;   /* position in text world (set during layout) */
     float  world_w, world_h;   /* size in world units */
     int    placed;              /* has been positioned in the text flow */
+    /* SVG-specific. For raster sources these stay zero / empty. */
+    int         is_svg;
+    float       svg_view_w;    /* SVG viewBox width (user units) */
+    float       svg_view_h;    /* SVG viewBox height */
+    SvgTextList texts;         /* parsed <text> runs — rendered via SDF pipeline */
 } Image;
 
 typedef struct {
