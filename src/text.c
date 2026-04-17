@@ -143,6 +143,8 @@ static int emit_glyph(TextMesh *mesh, Font *font, uint32_t cp,
         inst.s1 = g->s1; inst.t1 = g->t1;
         inst.text_offset = (int)(cp_start - text_base);
         inst.r = color->r; inst.g = color->g; inst.b = color->b;
+        inst.pivot_x = 0; inst.pivot_y = 0;
+        inst.rot_cos = 1.0f; inst.rot_sin = 0.0f;
         if (push_instance(mesh, &inst) < 0) return -1;
     }
     *cursor_x += g->advance;
@@ -267,13 +269,31 @@ void text_upload(TextMesh *mesh) {
         float s0 = g->s0, t0 = g->t0, s1 = g->s1, t1 = g->t1;
         float r = g->r, gr = g->g, b = g->b;
 
+        /* Rotate corners around pivot if requested. When rot_cos=1, rot_sin=0
+         * this is an identity (used by every text_layout caller). */
+        float c = g->rot_cos, s = g->rot_sin;
+        float px = g->pivot_x, py = g->pivot_y;
+        #define ROT(ox, oy, nx, ny) do { \
+            float _dx = (ox) - px, _dy = (oy) - py; \
+            (nx) = px + _dx * c - _dy * s; \
+            (ny) = py + _dx * s + _dy * c; \
+        } while (0)
+        float ax, ay, bx, by, cx, cy, dx_, dy_;
+        ROT(x0, y0, ax, ay);
+        ROT(x0, y1, bx, by);
+        ROT(x1, y0, cx, cy);
+        ROT(x1, y1, dx_, dy_);
+        #undef ROT
+
         float *v = verts + i * verts_per_glyph * floats_per_vert;
-        v[0]=x0; v[1]=y1; v[2]=z; v[3]=s0; v[4]=t0; v[5]=r; v[6]=gr; v[7]=b;
-        v[8]=x0; v[9]=y0; v[10]=z; v[11]=s0; v[12]=t1; v[13]=r; v[14]=gr; v[15]=b;
-        v[16]=x1; v[17]=y0; v[18]=z; v[19]=s1; v[20]=t1; v[21]=r; v[22]=gr; v[23]=b;
-        v[24]=x0; v[25]=y1; v[26]=z; v[27]=s0; v[28]=t0; v[29]=r; v[30]=gr; v[31]=b;
-        v[32]=x1; v[33]=y0; v[34]=z; v[35]=s1; v[36]=t1; v[37]=r; v[38]=gr; v[39]=b;
-        v[40]=x1; v[41]=y1; v[42]=z; v[43]=s1; v[44]=t0; v[45]=r; v[46]=gr; v[47]=b;
+        /* Triangle 1: (x0,y1) (x0,y0) (x1,y0) — corners bx/by, ax/ay, cx/cy */
+        v[0]=bx; v[1]=by; v[2]=z; v[3]=s0; v[4]=t0; v[5]=r; v[6]=gr; v[7]=b;
+        v[8]=ax; v[9]=ay; v[10]=z; v[11]=s0; v[12]=t1; v[13]=r; v[14]=gr; v[15]=b;
+        v[16]=cx; v[17]=cy; v[18]=z; v[19]=s1; v[20]=t1; v[21]=r; v[22]=gr; v[23]=b;
+        /* Triangle 2: (x0,y1) (x1,y0) (x1,y1) — corners bx/by, cx/cy, dx_/dy_ */
+        v[24]=bx; v[25]=by; v[26]=z; v[27]=s0; v[28]=t0; v[29]=r; v[30]=gr; v[31]=b;
+        v[32]=cx; v[33]=cy; v[34]=z; v[35]=s1; v[36]=t1; v[37]=r; v[38]=gr; v[39]=b;
+        v[40]=dx_; v[41]=dy_; v[42]=z; v[43]=s1; v[44]=t0; v[45]=r; v[46]=gr; v[47]=b;
     }
 
     glGenVertexArrays(1, &mesh->vao);

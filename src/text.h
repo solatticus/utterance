@@ -13,6 +13,12 @@ typedef struct {
     float s0, t0, s1, t1;
     int text_offset;    /* byte offset in source text */
     float r, g, b;      /* per-glyph color (ANSI or default) */
+    /* Optional 2D rotation around (pivot_x, pivot_y) applied by text_upload.
+     * Identity when rot_cos=1, rot_sin=0 (pivot is then irrelevant). Producers
+     * that don't rotate can leave these at zero and text_layout defaults them
+     * to identity on emission. */
+    float pivot_x, pivot_y;
+    float rot_cos, rot_sin;
 } GlyphInstance;
 
 typedef struct {

@@ -489,6 +489,14 @@ static void extract_text_elements(const char *buf, size_t len, Mat23 root_xf, Sv
         Mat23 combined = mat_mul(root_xf, local);
         mat_apply(combined, x, y, &t.x, &t.y);
 
+        /* Extract rotation angle from the combined affine. Assumes no shear
+         * or non-uniform scale in the chain — true for graphviz and most
+         * hand-authored SVGs. Angle is in the SVG (y-down) frame; the mesh
+         * builder flips sign when mapping into y-up world. */
+        float theta = atan2f(combined.b, combined.a);
+        if (fabsf(theta) > 1e-5f)
+            t.rotate_deg = theta * 180.0f / (float)M_PI;
+
         float fs = 0;
         if (attr_float(lt, tag_end, "font-size", &fs) && fs > 0) t.font_size_px = fs;
 
@@ -648,6 +656,14 @@ void svg_build_text_mesh(TextMesh *mesh, Font *font,
         float origin_x = wx + t->x * sx;
         float origin_y = wy + wh - t->y * sy;
 
+        /* Rotation: the SVG transform angle is in y-down SVG coords. Flipping
+         * Y to get world coords inverts rotation sign. Pivot is the anchor
+         * point in world space — SVG rotates the text run's local frame
+         * around the anchor, which is where the glyphs fan out from. */
+        float rot_rad = -t->rotate_deg * (float)M_PI / 180.0f;
+        float rot_cos = cosf(rot_rad);
+        float rot_sin = sinf(rot_rad);
+
         /* text-anchor: shift origin by total advance so the run ends up in the
          * right place. Measured in native font px, scaled by font_scale. */
         if (t->anchor != 0) {
@@ -684,6 +700,10 @@ void svg_build_text_mesh(TextMesh *mesh, Font *font,
                 inst.s1 = g->s1; inst.t1 = g->t1;
                 inst.text_offset = -1;
                 inst.r = t->r; inst.g = t->g; inst.b = t->b;
+                inst.pivot_x = origin_x;
+                inst.pivot_y = origin_y;
+                inst.rot_cos = rot_cos;
+                inst.rot_sin = rot_sin;
 
                 text_mesh_push(mesh, &inst);
             }
