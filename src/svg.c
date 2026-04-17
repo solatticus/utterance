@@ -66,6 +66,24 @@ void svg_text_list_destroy(SvgTextList *tl) {
     memset(tl, 0, sizeof(*tl));
 }
 
+void svg_link_list_destroy(SvgLinkList *ll) {
+    if (!ll) return;
+    for (int i = 0; i < ll->count; i++) free(ll->items[i].href);
+    free(ll->items);
+    memset(ll, 0, sizeof(*ll));
+}
+
+static void link_list_append(SvgLinkList *ll, SvgLink l) {
+    if (ll->count >= ll->capacity) {
+        int nc = ll->capacity ? ll->capacity * 2 : 8;
+        SvgLink *tmp = realloc(ll->items, (size_t)nc * sizeof(SvgLink));
+        if (!tmp) { free(l.href); return; }
+        ll->items = tmp;
+        ll->capacity = nc;
+    }
+    ll->items[ll->count++] = l;
+}
+
 static void text_list_append(SvgTextList *tl, SvgText t) {
     if (tl->count >= tl->capacity) {
         int nc = tl->capacity ? tl->capacity * 2 : 16;
@@ -441,14 +459,61 @@ static Mat23 extract_root_transform(const char *buf, size_t len) {
     return parse_transform_chain(vs, (int)(ve - vs));
 }
 
-/* Extract every <text>…</text> element into tl. */
+/* Extract every <text>…</text> element into tl. Also tracks enclosing
+ * <a xlink:href="..."> wrappers so each text run picks up its link target. */
 static void extract_text_elements(const char *buf, size_t len, Mat23 root_xf, SvgTextList *tl) {
     const char *end = buf + len;
     const char *p = buf;
 
+    /* Shallow stack of open <a> hrefs. SVGs rarely nest anchors more than
+     * once, but we support a small stack to be safe. */
+    #define HREF_STACK_MAX 8
+    char *href_stack[HREF_STACK_MAX] = {0};
+    int   href_depth = 0;
+
     while (p < end) {
         const char *lt = memchr(p, '<', (size_t)(end - p));
         if (!lt) break;
+
+        /* <a ...>  — open anchor, capture href */
+        if (lt + 2 < end && lt[1] == 'a' &&
+            (lt[2] == ' ' || lt[2] == '\t' || lt[2] == '\n' || lt[2] == '>')) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            int self_close = (tag_end > lt && tag_end[-1] == '/');
+            const char *vs, *ve;
+            char *href = NULL;
+            /* SVG 1.1 uses xlink:href; SVG 2 allows bare href. Check both. */
+            if (find_attr(lt, tag_end, "xlink:href", &vs, &ve) ||
+                find_attr(lt, tag_end, "href", &vs, &ve)) {
+                int n = (int)(ve - vs);
+                if (n > 0) {
+                    href = xml_decode(vs, n);
+                }
+            }
+            if (!self_close && href_depth < HREF_STACK_MAX) {
+                href_stack[href_depth++] = href;
+            } else {
+                free(href);
+            }
+            p = tag_end + 1;
+            continue;
+        }
+
+        /* </a> — pop anchor */
+        if (lt + 3 < end && lt[1] == '/' && lt[2] == 'a' &&
+            (lt[3] == '>' || lt[3] == ' ' || lt[3] == '\t' || lt[3] == '\n')) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            if (href_depth > 0) {
+                href_depth--;
+                free(href_stack[href_depth]);
+                href_stack[href_depth] = NULL;
+            }
+            p = tag_end + 1;
+            continue;
+        }
+
         /* Match only an opening <text tag (not <textPath, not </text>). */
         if (lt + 5 >= end || memcmp(lt, "<text", 5) != 0 ||
             (lt[5] != ' ' && lt[5] != '\t' && lt[5] != '\n' && lt[5] != '>')) {
@@ -519,7 +584,17 @@ static void extract_text_elements(const char *buf, size_t len, Mat23 root_xf, Sv
         if (!t.utf8) continue;
         if (t.utf8[0] == '\0') { free(t.utf8); continue; }
 
+        /* Inherit href from any enclosing <a>. */
+        if (href_depth > 0 && href_stack[href_depth - 1])
+            t.href = strdup(href_stack[href_depth - 1]);
+
         text_list_append(tl, t);
+    }
+
+    /* Drain any anchor frames left open by malformed input. */
+    while (href_depth > 0) {
+        href_depth--;
+        free(href_stack[href_depth]);
     }
 }
 
@@ -630,7 +705,7 @@ static float measure_utf8_advance(Font *font, const char *utf8) {
     return adv;
 }
 
-void svg_build_text_mesh(TextMesh *mesh, Font *font,
+void svg_build_text_mesh(TextMesh *mesh, SvgLinkList *links, Font *font,
                          const SvgTextList *texts,
                          float svg_w, float svg_h,
                          float wx, float wy, float ww, float wh) {
@@ -675,6 +750,7 @@ void svg_build_text_mesh(TextMesh *mesh, Font *font,
         const uint8_t *p = (const uint8_t *)t->utf8;
         const uint8_t *end = p + strlen(t->utf8);
         float cursor_x_native = 0.0f;
+        int glyph_start = mesh->count;
 
         while (p < end) {
             uint32_t cp = utf8_decode(&p, end);
@@ -708,6 +784,16 @@ void svg_build_text_mesh(TextMesh *mesh, Font *font,
                 text_mesh_push(mesh, &inst);
             }
             cursor_x_native += g->advance;
+        }
+
+        /* If this run sat inside an <a xlink:href>, record the glyph range
+         * so the caller can Ctrl+click any letter and reach the link. */
+        if (links && t->href && mesh->count > glyph_start) {
+            SvgLink L;
+            L.glyph_start = glyph_start;
+            L.glyph_end   = mesh->count;
+            L.href        = strdup(t->href);
+            link_list_append(links, L);
         }
     }
 }

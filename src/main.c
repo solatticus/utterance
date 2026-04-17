@@ -211,13 +211,14 @@ int main(int argc, char **argv) {
                  * world space so labels render crisp through the native font
                  * pipeline rather than the rasterized shape layer. */
                 if (img->placed && img->is_svg && img->texts.count > 0) {
-                    svg_build_text_mesh(&img->svg_text_mesh, &font, &img->texts,
+                    svg_build_text_mesh(&img->svg_text_mesh, &img->svg_links,
+                                        &font, &img->texts,
                                         img->svg_view_w, img->svg_view_h,
                                         img->world_x, img->world_y,
                                         img->world_w, img->world_h);
                     text_upload(&img->svg_text_mesh);
-                    fprintf(stderr, "utterance: built svg text mesh with %d glyphs\n",
-                            img->svg_text_mesh.count);
+                    fprintf(stderr, "utterance: built svg text mesh with %d glyphs, %d links\n",
+                            img->svg_text_mesh.count, img->svg_links.count);
                 }
             }
         }
@@ -534,29 +535,69 @@ int main(int argc, char **argv) {
                     float hx = cam.pos[0] + ct * click_ray[0];
                     float hy = cam.pos[1] + ct * click_ray[1];
                     float line_h = font.ascent - font.descent + font.line_gap;
-                    if (text_hit_test(&mesh, hx, hy, line_h * 2.0f)) {
-                        /* Ctrl+click: open URL */
-                        if (glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS &&
-                            md_links.count > 0) {
-                            int gi = text_glyph_at(&mesh, hx, hy);
-                            if (gi >= 0 && gi < mesh.count) {
-                                int off = mesh.instances[gi].text_offset;
-                                for (int li = 0; li < md_links.count; li++) {
-                                    if (off >= md_links.links[li].start_offset &&
-                                        off < md_links.links[li].end_offset) {
-                                        char cmd[2048];
-                                        snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
-                                                 md_links.links[li].url);
-                                        if (system(cmd) == 0)
-                                            fprintf(stderr, "utterance: opening %s\n",
-                                                    md_links.links[li].url);
-                                        break;
-                                    }
+                    int ctrl_down = glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
+                    int opened = 0;
+
+                    /* Ctrl+click: try every link source before falling through
+                     * to blink. Markdown URL ranges first, then SVG <a>
+                     * wrappers whose glyphs live in image text meshes. */
+                    if (ctrl_down && md_links.count > 0 &&
+                        text_hit_test(&mesh, hx, hy, line_h * 2.0f)) {
+                        int gi = text_glyph_at(&mesh, hx, hy);
+                        if (gi >= 0 && gi < mesh.count) {
+                            int off = mesh.instances[gi].text_offset;
+                            for (int li = 0; li < md_links.count; li++) {
+                                if (off >= md_links.links[li].start_offset &&
+                                    off < md_links.links[li].end_offset) {
+                                    char cmd[2048];
+                                    snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
+                                             md_links.links[li].url);
+                                    if (system(cmd) == 0)
+                                        fprintf(stderr, "utterance: opening %s\n",
+                                                md_links.links[li].url);
+                                    opened = 1;
+                                    break;
                                 }
                             }
-                        } else {
-                            click_blink = 1;
                         }
+                    }
+                    if (ctrl_down && !opened) {
+                        for (int ii = 0; ii < images.count && !opened; ii++) {
+                            Image *img = &images.items[ii];
+                            if (img->svg_text_mesh.count == 0 || img->svg_links.count == 0) continue;
+                            int gi = text_glyph_at(&img->svg_text_mesh, hx, hy);
+                            if (gi < 0) continue;
+                            /* text_glyph_at is nearest-neighbour — reject
+                             * clicks that don't actually land on the glyph. */
+                            GlyphInstance *gp = &img->svg_text_mesh.instances[gi];
+                            float cxc = gp->pivot_x + (gp->x + gp->w * 0.5f - gp->pivot_x) * gp->rot_cos
+                                      - (gp->y + gp->h * 0.5f - gp->pivot_y) * gp->rot_sin;
+                            float cyc = gp->pivot_y + (gp->x + gp->w * 0.5f - gp->pivot_x) * gp->rot_sin
+                                      + (gp->y + gp->h * 0.5f - gp->pivot_y) * gp->rot_cos;
+                            float rad = (gp->w > gp->h ? gp->w : gp->h);
+                            if ((hx - cxc) * (hx - cxc) + (hy - cyc) * (hy - cyc) > rad * rad)
+                                continue;
+                            for (int li = 0; li < img->svg_links.count; li++) {
+                                if (gi >= img->svg_links.items[li].glyph_start &&
+                                    gi <  img->svg_links.items[li].glyph_end) {
+                                    char cmd[2048];
+                                    snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
+                                             img->svg_links.items[li].href);
+                                    if (system(cmd) == 0)
+                                        fprintf(stderr, "utterance: opening %s\n",
+                                                img->svg_links.items[li].href);
+                                    opened = 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    /* Plain click on text: blink. Ctrl+click that didn't hit
+                     * any link falls back to blink too so the interaction
+                     * doesn't feel dead. */
+                    if (!opened && text_hit_test(&mesh, hx, hy, line_h * 2.0f)) {
+                        click_blink = 1;
                     }
                 }
             }

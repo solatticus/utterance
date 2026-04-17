@@ -18,6 +18,7 @@ typedef struct {
     float       svg_view_h;    /* SVG viewBox height */
     SvgTextList texts;         /* parsed <text> runs — rendered via SDF pipeline */
     TextMesh    svg_text_mesh; /* SDF glyph mesh built from texts, in world space */
+    SvgLinkList svg_links;     /* glyph-range → URL map for Ctrl+click */
 } Image;
 
 typedef struct {

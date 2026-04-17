@@ -216,6 +216,7 @@ int image_load(ImageList *il, const char *path, const char *base_dir) {
     img->svg_view_h = svg_h;
     img->texts = texts;
     memset(&img->svg_text_mesh, 0, sizeof(img->svg_text_mesh));
+    memset(&img->svg_links, 0, sizeof(img->svg_links));
 
     fprintf(stderr, "utterance: loaded %s %dx%d\n", is_svg ? "svg" : "image", w, h);
     return idx;
@@ -268,6 +269,7 @@ void image_list_destroy(ImageList *il) {
             glDeleteTextures(1, &il->items[i].texture);
         svg_text_list_destroy(&il->items[i].texts);
         text_destroy(&il->items[i].svg_text_mesh);
+        svg_link_list_destroy(&il->items[i].svg_links);
     }
     free(il->items);
     memset(il, 0, sizeof(*il));

@@ -23,6 +23,23 @@ typedef struct {
     int      capacity;
 } SvgTextList;
 
+/* A hit range in a built SDF text mesh that maps back to an <a xlink:href="...">
+ * URL. When the user Ctrl+clicks a glyph whose index falls in [glyph_start,
+ * glyph_end), href is the target to open. */
+typedef struct {
+    int   glyph_start;
+    int   glyph_end;
+    char *href;   /* owned */
+} SvgLink;
+
+typedef struct {
+    SvgLink *items;
+    int      count;
+    int      capacity;
+} SvgLinkList;
+
+void svg_link_list_destroy(SvgLinkList *ll);
+
 /* Load an SVG file. On success:
  *  - *out_tex owns a GL_RGBA texture sized out_tex_w × out_tex_h containing
  *    the rasterized shape layer (no text).
@@ -49,7 +66,7 @@ void svg_text_list_destroy(SvgTextList *tl);
  * each text run's SVG-space anchor point into world space using the image's
  * bounding box. The mesh is populated with positioned GlyphInstances and the
  * caller must run text_upload on it afterwards. */
-void svg_build_text_mesh(TextMesh *mesh, Font *font,
+void svg_build_text_mesh(TextMesh *mesh, SvgLinkList *links, Font *font,
                          const SvgTextList *texts,
                          float svg_w, float svg_h,
                          float wx, float wy, float ww, float wh);
