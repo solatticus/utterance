@@ -23,7 +23,9 @@ Two-phase text layout: **prepare** (segment UTF-8 + cache glyph widths, once) th
 - **ANSI color** — 8-color, 256-color, 24-bit RGB. Per-vertex color in the shader. `gcc 2>&1 | ut` just works
 - **Markdown** — Headers, bold, italic, code spans, fenced code blocks with background boxes, links, blockquotes, lists, tables, horizontal rules. Auto-detected from `.md` extension or content
 - **Images** — PNG/JPEG/GIF/BMP via stb_image, rendered as textured quads in the text flow. Remote URLs fetched with curl
-- **Ctrl+click links** — Opens URLs in your browser
+- **SVG scenes** — Standalone `.svg` files load into a scene graph with extruded fills. Rects become cuboids, circles/ellipses cylinders, lines oriented prisms. Text runs render through the SDF pipeline. Click any shape to select it; clicking a containing rect co-highlights everything inside it
+- **GPU picking** — R32UI id-buffer pass resolves hover and click to the exact node under the cursor. One extra draw per node, only on frames that need it
+- **Ctrl+click links** — Opens URLs in your browser (markdown and `<a>`-wrapped SVG shapes)
 - **Text cursor** — Arrow keys, Page Up/Down, Home/End, Ctrl+Home/End. Blinking caret. Shift+arrow selection
 - **CJK breaking** — Per-character line breaks for Chinese, Japanese, Korean, fullwidth forms
 - **Soft-hyphen** — U+00AD breaks with visible hyphen at discretionary points
@@ -46,6 +48,7 @@ Two-phase text layout: **prepare** (segment UTF-8 + cache glyph widths, once) th
 | **Shift** | 5× speed |
 | **+/-** | Speed multiplier |
 | **Scroll wheel** | Vertical scroll |
+| **Ctrl+Scroll** | Zoom (forward/back) |
 | **Right-click** | Mouselook |
 | **Left-click** | Blink teleport / deselect |
 | **Click + drag** | Select text |

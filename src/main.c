@@ -233,6 +233,7 @@ int main(int argc, char **argv) {
                             &svg_w, &svg_h) == 0) {
             scene_bake_transforms(&svg_scene);
             scene_compute_bounds(&svg_scene);
+            scene_compute_groups(&svg_scene);
             scene_upload(&svg_scene);
             /* Text runs live in the SVG's own viewbox frame. Map them into
              * world with y flipped (matches how scene verts were emitted). */
@@ -438,10 +439,22 @@ int main(int argc, char **argv) {
 
         float dx = 0, dy = 0, dz = 0;
 
-        /* Scroll wheel */
+        /* Scroll wheel — plain scrolls the view vertically (text reading),
+         * Ctrl+scroll zooms along the camera forward axis (same as W/S but
+         * one-off flicks). Speed mirrors the W/S fast-forward feel. */
         if (win.scroll_y != 0.0f) {
-            float scroll_speed = (font.ascent - font.descent + font.line_gap) * 3.0f;
-            dy += win.scroll_y * scroll_speed;
+            int ctrl_held =
+                glfwGetKey(win.handle, GLFW_KEY_LEFT_CONTROL)  == GLFW_PRESS ||
+                glfwGetKey(win.handle, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+            float line_h = font.ascent - font.descent + font.line_gap;
+            if (ctrl_held) {
+                float zoom_step = line_h * 8.0f * speed_mult;
+                dx += fwd[0] * win.scroll_y * zoom_step;
+                dy += fwd[1] * win.scroll_y * zoom_step;
+                dz += fwd[2] * win.scroll_y * zoom_step;
+            } else {
+                dy += win.scroll_y * line_h * 3.0f;
+            }
         }
 
         float fspeed = speed * 4.0f;
@@ -827,6 +840,48 @@ int main(int argc, char **argv) {
 
         float mvp[16];
         camera_mvp(&cam, mvp);
+
+        /* Scene picking: GPU id-buffer pass against the SVG scene. Only runs
+         * when the cursor moved or the user just released a click; picking
+         * every frame would redraw the whole scene twice. glReadPixels expects
+         * bottom-origin, so flip mouse_y against window height. */
+        if (have_svg_scene) {
+            int mx = (int)win.mouse_x;
+            int my = win.height - 1 - (int)win.mouse_y;
+            int moved = (win.mouse_x != win.last_mouse_x) ||
+                        (win.mouse_y != win.last_mouse_y);
+            if (moved) {
+                svg_scene.hover_node =
+                    scene_pick(&svg_scene, mvp, mx, my, win.width, win.height);
+            }
+            if (win.lmb_released && !sel_dragging) {
+                int hit = scene_pick(&svg_scene, mvp, mx, my,
+                                     win.width, win.height);
+                svg_scene.selected_node = hit;
+                if (hit >= 0) {
+                    SceneNode *nd = &svg_scene.nodes[hit];
+                    const char *kn = "?";
+                    switch (nd->svg_elem) {
+                    case SVG_ELEM_RECT:     kn = "rect";     break;
+                    case SVG_ELEM_CIRCLE:   kn = "circle";   break;
+                    case SVG_ELEM_ELLIPSE:  kn = "ellipse";  break;
+                    case SVG_ELEM_LINE:     kn = "line";     break;
+                    case SVG_ELEM_POLYGON:  kn = "polygon";  break;
+                    case SVG_ELEM_POLYLINE: kn = "polyline"; break;
+                    case SVG_ELEM_PATH:     kn = "path";     break;
+                    case SVG_ELEM_TEXT:     kn = "text";     break;
+                    default: break;
+                    }
+                    fprintf(stderr,
+                            "utterance: picked node %d <%s> params=[%.2f %.2f %.2f %.2f %.2f %.2f] href=%s\n",
+                            hit, kn,
+                            nd->svg_params[0], nd->svg_params[1],
+                            nd->svg_params[2], nd->svg_params[3],
+                            nd->svg_params[4], nd->svg_params[5],
+                            nd->href ? nd->href : "(none)");
+                }
+            }
+        }
 
         /* Render — handle resize */
         if (win.width != prev_fw || win.height != prev_fh) {

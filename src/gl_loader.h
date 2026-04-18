@@ -56,7 +56,17 @@
     X(void, Uniform4f, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) \
     X(void, Uniform4fv, GLint location, GLsizei count, const GLfloat *value) \
     X(void, GenerateMipmap, GLenum target) \
-    X(void, DrawElements, GLenum mode, GLsizei count, GLenum type, const void *indices)
+    X(void, DrawElements, GLenum mode, GLsizei count, GLenum type, const void *indices) \
+    X(void, GenRenderbuffers, GLsizei n, GLuint *renderbuffers) \
+    X(void, BindRenderbuffer, GLenum target, GLuint renderbuffer) \
+    X(void, RenderbufferStorage, GLenum target, GLenum internalformat, GLsizei width, GLsizei height) \
+    X(void, FramebufferRenderbuffer, GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) \
+    X(void, DeleteRenderbuffers, GLsizei n, const GLuint *renderbuffers) \
+    X(void, ClearBufferuiv, GLenum buffer, GLint drawbuffer, const GLuint *value) \
+    X(void, Uniform1ui, GLint location, GLuint v0) \
+    X(void, Uniform3fv, GLint location, GLsizei count, const GLfloat *value) \
+    X(void, ReadBuffer, GLenum mode) \
+    X(void, ReadPixels, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)
 
 /* Declare function pointers as gl* */
 #define X(ret, name, ...) extern ret (APIENTRY *gl##name)(__VA_ARGS__);

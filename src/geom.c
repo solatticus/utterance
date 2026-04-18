@@ -169,73 +169,254 @@ uint32_t geom_triangulate(const GVec2 *pts, uint32_t n, uint32_t *out_indices) {
 /* ---------------------------------------------------------------- extrude */
 
 uint32_t geom_extrude_polygon(const GVec2 *pts, uint32_t n, float depth,
-                              GVec3 *out_verts, uint32_t *out_indices) {
-    if (n < 3 || !out_verts || !out_indices) return 0;
+                              GVec3 *out_verts, GVec3 *out_normals,
+                              uint32_t *out_indices, uint32_t *out_vert_count) {
+    if (n < 3 || !out_verts || !out_normals || !out_indices) return 0;
 
-    /* 0..n-1: back cap at z=0 ; n..2n-1: front cap at z=depth. */
+    /* Cap verts: 0..n-1 back (z=0), n..2n-1 front (z=depth). Per-cap flat
+     * normals applied uniformly. */
     for (uint32_t i = 0; i < n; i++) {
-        out_verts[i].x     = pts[i].x;
-        out_verts[i].y     = pts[i].y;
-        out_verts[i].z     = 0.0f;
-        out_verts[n + i].x = pts[i].x;
-        out_verts[n + i].y = pts[i].y;
-        out_verts[n + i].z = depth;
+        out_verts[i].x = pts[i].x;     out_verts[i].y = pts[i].y;     out_verts[i].z = 0.0f;
+        out_verts[n + i].x = pts[i].x; out_verts[n + i].y = pts[i].y; out_verts[n + i].z = depth;
+        out_normals[i].x = 0;     out_normals[i].y = 0;     out_normals[i].z = -1.0f;
+        out_normals[n + i].x = 0; out_normals[n + i].y = 0; out_normals[n + i].z =  1.0f;
     }
 
-    /* Triangulate the cap once — same topology works for both caps because
-     * both rings use the same vertex ordering. geom_triangulate already
-     * orients to CCW internally (front cap in world space). */
+    /* Triangulate the front cap (CCW in world). Reuse that topology for the
+     * back cap with flipped winding so its face points into -z. */
     uint32_t cap_tris = geom_triangulate(pts, n, out_indices);
     if (cap_tris == 0) return 0;
 
     uint32_t ic = cap_tris * 3;
-    /* Back cap: reverse winding so its normal points into -z (outward when the
-     * front cap's normal points +z). Also offset back-cap indices stay in the
-     * [0, n) range — they're already there from triangulate's direct write. */
+    /* Back cap: reverse winding on the indices already written in place. */
     for (uint32_t t = 0; t < cap_tris; t++) {
         uint32_t a = out_indices[t * 3 + 0];
         uint32_t b = out_indices[t * 3 + 1];
         uint32_t c = out_indices[t * 3 + 2];
-        /* Flip winding for the back cap. */
         out_indices[t * 3 + 0] = a;
         out_indices[t * 3 + 1] = c;
         out_indices[t * 3 + 2] = b;
     }
 
-    /* Emit a second copy for the front cap — same triangulation, indices
-     * offset by n to point at the top ring, with original winding restored. */
+    /* Front cap: same triangulation, indices + n to reach the upper ring,
+     * original winding restored. */
     for (uint32_t t = 0; t < cap_tris; t++) {
         uint32_t a = out_indices[t * 3 + 0];
-        uint32_t b = out_indices[t * 3 + 2]; /* swap back */
+        uint32_t b = out_indices[t * 3 + 2];  /* swap back to CCW */
         uint32_t c = out_indices[t * 3 + 1];
         out_indices[ic++] = a + n;
         out_indices[ic++] = b + n;
         out_indices[ic++] = c + n;
     }
 
-    /* Side quads. For each edge (i, i+1) the four corners are:
-     *   bi = i, bj = (i+1)%n  on the back ring
-     *   ti = n+i, tj = n + (i+1)%n  on the front ring
-     *
-     * Determine winding so side-quad normals point outward. For CCW polygons
-     * (signed area > 0), the outward face is (bi, bj, tj, ti). For CW it's
-     * reversed. Using the signed area test keeps this consistent whatever
-     * orientation the caller supplied. */
+    /* Side quads. Four fresh verts per edge so each face gets its own flat
+     * normal — no seam averaging with the cap or neighboring walls. */
     int ccw = polygon_signed_area(pts, n) > 0.0f;
+    uint32_t base = 2 * n;
     for (uint32_t i = 0; i < n; i++) {
-        uint32_t j  = (i + 1) % n;
-        uint32_t bi = i;
-        uint32_t bj = j;
-        uint32_t ti = n + i;
-        uint32_t tj = n + j;
-        if (ccw) {
-            out_indices[ic++] = bi; out_indices[ic++] = tj; out_indices[ic++] = ti;
-            out_indices[ic++] = bi; out_indices[ic++] = bj; out_indices[ic++] = tj;
-        } else {
-            out_indices[ic++] = bi; out_indices[ic++] = ti; out_indices[ic++] = tj;
-            out_indices[ic++] = bi; out_indices[ic++] = tj; out_indices[ic++] = bj;
+        uint32_t j = (i + 1) % n;
+        GVec2 a = pts[i], b = pts[j];
+        /* Outward normal of edge (a → b) for a CCW polygon is the right-hand
+         * perpendicular; for CW, the left-hand. Normalize; z component is 0
+         * (side faces are axis-aligned along +z extrusion). */
+        float ex = b.x - a.x, ey = b.y - a.y;
+        float nx, ny;
+        if (ccw) { nx =  ey; ny = -ex; }
+        else     { nx = -ey; ny =  ex; }
+        float nl = sqrtf(nx * nx + ny * ny);
+        if (nl > 0) { nx /= nl; ny /= nl; }
+
+        uint32_t v0 = base + i * 4 + 0;  /* back-a  */
+        uint32_t v1 = base + i * 4 + 1;  /* back-b  */
+        uint32_t v2 = base + i * 4 + 2;  /* front-b */
+        uint32_t v3 = base + i * 4 + 3;  /* front-a */
+        out_verts[v0].x = a.x; out_verts[v0].y = a.y; out_verts[v0].z = 0.0f;
+        out_verts[v1].x = b.x; out_verts[v1].y = b.y; out_verts[v1].z = 0.0f;
+        out_verts[v2].x = b.x; out_verts[v2].y = b.y; out_verts[v2].z = depth;
+        out_verts[v3].x = a.x; out_verts[v3].y = a.y; out_verts[v3].z = depth;
+        for (int k = 0; k < 4; k++) {
+            out_normals[v0 + k].x = nx;
+            out_normals[v0 + k].y = ny;
+            out_normals[v0 + k].z = 0.0f;
         }
+
+        /* Winding: quad a-b-b'-a' seen from outside. For both CCW and CW input
+         * the tri pair (v0,v1,v2)+(v0,v2,v3) is correct once nx,ny point out. */
+        out_indices[ic++] = v0; out_indices[ic++] = v1; out_indices[ic++] = v2;
+        out_indices[ic++] = v0; out_indices[ic++] = v2; out_indices[ic++] = v3;
     }
+
+    if (out_vert_count) *out_vert_count = 2 * n + 4 * n;
+    return ic / 3;
+}
+
+/* ---------------------------------------------------------------- cuboid */
+
+static GVec3 tri_normal(GVec3 a, GVec3 b, GVec3 c) {
+    float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+    float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    GVec3 n = {uy * vz - uz * vy,
+               uz * vx - ux * vz,
+               ux * vy - uy * vx};
+    float ln = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (ln > 0) { n.x /= ln; n.y /= ln; n.z /= ln; }
+    return n;
+}
+
+uint32_t geom_build_cuboid(GVec2 p0, GVec2 p1, GVec2 p2, GVec2 p3, float depth,
+                           GVec3 *out_verts, GVec3 *out_normals,
+                           uint32_t *out_indices) {
+    if (!out_verts || !out_normals || !out_indices) return 0;
+
+    /* Ensure the 4 bottom corners wind CCW looking down +z so face normals
+     * computed below point outward. */
+    GVec2 q[4] = {p0, p1, p2, p3};
+    if (polygon_signed_area(q, 4) < 0.0f) {
+        GVec2 t = q[1]; q[1] = q[3]; q[3] = t;
+    }
+
+    GVec3 bot[4] = {
+        {q[0].x, q[0].y, 0.0f},
+        {q[1].x, q[1].y, 0.0f},
+        {q[2].x, q[2].y, 0.0f},
+        {q[3].x, q[3].y, 0.0f},
+    };
+    GVec3 top[4] = {
+        {q[0].x, q[0].y, depth},
+        {q[1].x, q[1].y, depth},
+        {q[2].x, q[2].y, depth},
+        {q[3].x, q[3].y, depth},
+    };
+
+    /* Face table: for each of 6 faces we list 4 verts in CCW order seen from
+     * outside, followed by a face-normal source triangle. Layout:
+     *   face 0: bottom (-z) — bot reversed
+     *   face 1: top    (+z) — top
+     *   faces 2..5: sides for edges (0,1), (1,2), (2,3), (3,0)
+     */
+    GVec3 face_verts[6][4] = {
+        {bot[0], bot[3], bot[2], bot[1]},                 /* bottom */
+        {top[0], top[1], top[2], top[3]},                 /* top    */
+        {bot[0], bot[1], top[1], top[0]},                 /* side 0→1 */
+        {bot[1], bot[2], top[2], top[1]},                 /* side 1→2 */
+        {bot[2], bot[3], top[3], top[2]},                 /* side 2→3 */
+        {bot[3], bot[0], top[0], top[3]},                 /* side 3→0 */
+    };
+
+    uint32_t v = 0, ic = 0;
+    for (int f = 0; f < 6; f++) {
+        GVec3 n = tri_normal(face_verts[f][0], face_verts[f][1], face_verts[f][2]);
+        uint32_t base = v;
+        for (int k = 0; k < 4; k++) {
+            out_verts[v]   = face_verts[f][k];
+            out_normals[v] = n;
+            v++;
+        }
+        out_indices[ic++] = base;
+        out_indices[ic++] = base + 1;
+        out_indices[ic++] = base + 2;
+        out_indices[ic++] = base;
+        out_indices[ic++] = base + 2;
+        out_indices[ic++] = base + 3;
+    }
+    return ic / 3;
+}
+
+/* ---------------------------------------------------------------- cylinder */
+
+uint32_t geom_build_cylinder(const GVec2 *in_ring, uint32_t n, float depth,
+                             GVec3 *out_verts, GVec3 *out_normals,
+                             uint32_t *out_indices) {
+    if (n < 3 || !in_ring || !out_verts || !out_normals || !out_indices) return 0;
+
+    /* Auto-orient to CCW so face winding and radial normals stay consistent
+     * regardless of caller sign conventions. One bounded malloc at build time
+     * — cheap and matches the rest of the load-time pipeline. */
+    int reverse = polygon_signed_area(in_ring, n) < 0.0f;
+    GVec2 *ring = malloc((size_t)n * sizeof(GVec2));
+    if (!ring) return 0;
+    for (uint32_t i = 0; i < n; i++)
+        ring[i] = reverse ? in_ring[n - 1 - i] : in_ring[i];
+
+    /* Centroid for cap centers — averages to the geometric center for any
+     * uniformly-sampled convex ring. */
+    float cx = 0, cy = 0;
+    for (uint32_t i = 0; i < n; i++) { cx += ring[i].x; cy += ring[i].y; }
+    cx /= (float)n; cy /= (float)n;
+
+    uint32_t v = 0, ic = 0;
+
+    /* Bottom cap: center + ring, normal (0,0,-1). Winding flipped so the face
+     * points -z outward. */
+    uint32_t bot_center = v;
+    out_verts[v]   = (GVec3){cx, cy, 0.0f};
+    out_normals[v] = (GVec3){0.0f, 0.0f, -1.0f};
+    v++;
+    uint32_t bot_ring = v;
+    for (uint32_t i = 0; i < n; i++) {
+        out_verts[v]   = (GVec3){ring[i].x, ring[i].y, 0.0f};
+        out_normals[v] = (GVec3){0.0f, 0.0f, -1.0f};
+        v++;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t j = (i + 1) % n;
+        out_indices[ic++] = bot_center;
+        out_indices[ic++] = bot_ring + j;
+        out_indices[ic++] = bot_ring + i;
+    }
+
+    /* Top cap. Normal (0,0,+1), standard CCW winding. */
+    uint32_t top_center = v;
+    out_verts[v]   = (GVec3){cx, cy, depth};
+    out_normals[v] = (GVec3){0.0f, 0.0f, 1.0f};
+    v++;
+    uint32_t top_ring = v;
+    for (uint32_t i = 0; i < n; i++) {
+        out_verts[v]   = (GVec3){ring[i].x, ring[i].y, depth};
+        out_normals[v] = (GVec3){0.0f, 0.0f, 1.0f};
+        v++;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t j = (i + 1) % n;
+        out_indices[ic++] = top_center;
+        out_indices[ic++] = top_ring + i;
+        out_indices[ic++] = top_ring + j;
+    }
+
+    /* Side ring verts — separate from cap verts so side normals can differ.
+     * Each vertex gets a smooth outward normal computed from the tangent at
+     * that ring position (centered finite difference). Right-perpendicular
+     * of the CCW tangent points outward. */
+    uint32_t side_bot = v;
+    uint32_t side_top = v + n;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t prev = (i + n - 1) % n;
+        uint32_t next = (i + 1) % n;
+        float tx = ring[next].x - ring[prev].x;
+        float ty = ring[next].y - ring[prev].y;
+        float nx = ty, ny = -tx;
+        float nl = sqrtf(nx * nx + ny * ny);
+        if (nl > 0) { nx /= nl; ny /= nl; }
+
+        out_verts[side_bot + i]   = (GVec3){ring[i].x, ring[i].y, 0.0f};
+        out_normals[side_bot + i] = (GVec3){nx, ny, 0.0f};
+        out_verts[side_top + i]   = (GVec3){ring[i].x, ring[i].y, depth};
+        out_normals[side_top + i] = (GVec3){nx, ny, 0.0f};
+    }
+    v = side_top + n;
+
+    /* Side quads — each edge of the ring becomes a quad (2 tris) using the
+     * side ring verts. CCW winding when viewed from outside. */
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t j = (i + 1) % n;
+        uint32_t bi = side_bot + i, bj = side_bot + j;
+        uint32_t ti = side_top + i, tj = side_top + j;
+        out_indices[ic++] = bi; out_indices[ic++] = bj; out_indices[ic++] = tj;
+        out_indices[ic++] = bi; out_indices[ic++] = tj; out_indices[ic++] = ti;
+    }
+
+    free(ring);
+    (void)v;
     return ic / 3;
 }
 

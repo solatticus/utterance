@@ -121,6 +121,56 @@ static void mat_apply(Mat23 m, float x, float y, float *ox, float *oy) {
     *oy = m.b * x + m.d * y + m.f;
 }
 
+/* ---------------------------------------------------------------- primitive storage */
+
+/* Primitive records — one per SVG primitive element (rect/circle/ellipse/line/
+ * path/polygon/polyline) in document order. Emitted by a parallel XML walker
+ * alongside the text extractor. The nanosvg shape iterator correlates against
+ * this list by doc-order index so rects can be swapped for cuboid meshes
+ * (and later: cylinders/spheres for circle/ellipse, oriented boxes for line).
+ *
+ * Record kept internal to svg.c — not part of the public API. */
+typedef struct {
+    SvgElemKind kind;
+    char       *id;         /* owned, or NULL */
+    char       *href;       /* owned, or NULL — enclosing <a xlink:href> */
+    Mat23       xform;      /* root × any enclosing <g> × this element's transform */
+    /* Kind-specific geometry in SVG user-space, pre-transform:
+     *   RECT:    x, y, w, h, rx, ry
+     *   CIRCLE:  cx, cy, r, 0, 0, 0
+     *   ELLIPSE: cx, cy, rx, ry, 0, 0
+     *   LINE:    x1, y1, x2, y2, 0, 0
+     *   PATH/POLYGON/POLYLINE: unused — record acts as a doc-order spacer */
+    float       params[6];
+} SvgPrimitive;
+
+typedef struct {
+    SvgPrimitive *items;
+    int           count;
+    int           capacity;
+} SvgPrimitiveList;
+
+static void prim_list_destroy(SvgPrimitiveList *pl) {
+    if (!pl) return;
+    for (int i = 0; i < pl->count; i++) {
+        free(pl->items[i].id);
+        free(pl->items[i].href);
+    }
+    free(pl->items);
+    memset(pl, 0, sizeof(*pl));
+}
+
+static void prim_append(SvgPrimitiveList *pl, SvgPrimitive p) {
+    if (pl->count >= pl->capacity) {
+        int nc = pl->capacity ? pl->capacity * 2 : 64;
+        SvgPrimitive *tmp = realloc(pl->items, (size_t)nc * sizeof(SvgPrimitive));
+        if (!tmp) { free(p.id); free(p.href); return; }
+        pl->items = tmp;
+        pl->capacity = nc;
+    }
+    pl->items[pl->count++] = p;
+}
+
 /* ---------------------------------------------------------------- lexing */
 
 static const char *skip_ws(const char *s, const char *end) {
@@ -459,15 +509,16 @@ static Mat23 extract_root_transform(const char *buf, size_t len) {
     return parse_transform_chain(vs, (int)(ve - vs));
 }
 
+/* Shallow stack of open <a> hrefs shared between the text and primitive
+ * walkers. SVGs rarely nest anchors more than once; 8 is plenty. */
+#define HREF_STACK_MAX 8
+
 /* Extract every <text>…</text> element into tl. Also tracks enclosing
  * <a xlink:href="..."> wrappers so each text run picks up its link target. */
 static void extract_text_elements(const char *buf, size_t len, Mat23 root_xf, SvgTextList *tl) {
     const char *end = buf + len;
     const char *p = buf;
 
-    /* Shallow stack of open <a> hrefs. SVGs rarely nest anchors more than
-     * once, but we support a small stack to be safe. */
-    #define HREF_STACK_MAX 8
     char *href_stack[HREF_STACK_MAX] = {0};
     int   href_depth = 0;
 
@@ -592,6 +643,199 @@ static void extract_text_elements(const char *buf, size_t len, Mat23 root_xf, Sv
     }
 
     /* Drain any anchor frames left open by malformed input. */
+    while (href_depth > 0) {
+        href_depth--;
+        free(href_stack[href_depth]);
+    }
+}
+
+/* ---------------------------------------------------------------- primitive extraction */
+
+/* Tag dispatch table — name length is precomputed so we can match without
+ * strcmp's NUL-terminator assumption on our tag-start pointer. */
+static const struct { const char *name; int nlen; SvgElemKind kind; } kPrimTags[] = {
+    {"rect",     4, SVG_ELEM_RECT},
+    {"circle",   6, SVG_ELEM_CIRCLE},
+    {"ellipse",  7, SVG_ELEM_ELLIPSE},
+    {"line",     4, SVG_ELEM_LINE},
+    {"path",     4, SVG_ELEM_PATH},
+    {"polygon",  7, SVG_ELEM_POLYGON},
+    {"polyline", 8, SVG_ELEM_POLYLINE},
+};
+
+static int match_primitive_tag(const char *lt, const char *end, int *out_idx) {
+    for (size_t i = 0; i < sizeof(kPrimTags) / sizeof(kPrimTags[0]); i++) {
+        int nl = kPrimTags[i].nlen;
+        if (lt + 1 + nl >= end) continue;
+        if (lt[0] != '<') continue;
+        if (memcmp(lt + 1, kPrimTags[i].name, (size_t)nl) != 0) continue;
+        char after = lt[1 + nl];
+        if (after != ' ' && after != '\t' && after != '\n' &&
+            after != '\r' && after != '>' && after != '/') continue;
+        *out_idx = (int)i;
+        return 1;
+    }
+    return 0;
+}
+
+/* Walks the SVG buffer emitting one SvgPrimitive record per visible primitive
+ * element in document order. Tracks <a> for href capture and <defs> for
+ * suppression — nanosvg skips primitives inside <defs>, and we must match
+ * that filter exactly so the primitive list aligns 1:1 with the nanosvg shape
+ * list in source order. */
+static void extract_primitive_elements(const char *buf, size_t len, Mat23 root_xf,
+                                       SvgPrimitiveList *pl) {
+    const char *end = buf + len;
+    const char *p = buf;
+
+    char *href_stack[HREF_STACK_MAX] = {0};
+    int   href_depth = 0;
+    int   defs_depth = 0;
+
+    while (p < end) {
+        const char *lt = memchr(p, '<', (size_t)(end - p));
+        if (!lt) break;
+
+        /* <defs> open */
+        if (lt + 5 < end && memcmp(lt, "<defs", 5) == 0 &&
+            (lt[5] == ' ' || lt[5] == '\t' || lt[5] == '\n' || lt[5] == '>' || lt[5] == '/')) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            int self_close = (tag_end > lt && tag_end[-1] == '/');
+            if (!self_close) defs_depth++;
+            p = tag_end + 1;
+            continue;
+        }
+        /* </defs> */
+        if (lt + 6 < end && memcmp(lt, "</defs", 6) == 0) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            if (defs_depth > 0) defs_depth--;
+            p = tag_end + 1;
+            continue;
+        }
+
+        /* <a> — push anchor href */
+        if (lt + 2 < end && lt[1] == 'a' &&
+            (lt[2] == ' ' || lt[2] == '\t' || lt[2] == '\n' || lt[2] == '>')) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            int self_close = (tag_end > lt && tag_end[-1] == '/');
+            const char *vs, *ve;
+            char *href = NULL;
+            if (find_attr(lt, tag_end, "xlink:href", &vs, &ve) ||
+                find_attr(lt, tag_end, "href", &vs, &ve)) {
+                int n = (int)(ve - vs);
+                if (n > 0) href = xml_decode(vs, n);
+            }
+            if (!self_close && href_depth < HREF_STACK_MAX) {
+                href_stack[href_depth++] = href;
+            } else {
+                free(href);
+            }
+            p = tag_end + 1;
+            continue;
+        }
+        /* </a> — pop anchor */
+        if (lt + 3 < end && lt[1] == '/' && lt[2] == 'a' &&
+            (lt[3] == '>' || lt[3] == ' ' || lt[3] == '\t' || lt[3] == '\n')) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+            if (href_depth > 0) {
+                href_depth--;
+                free(href_stack[href_depth]);
+                href_stack[href_depth] = NULL;
+            }
+            p = tag_end + 1;
+            continue;
+        }
+
+        /* Primitive tag dispatch */
+        int prim_idx = -1;
+        if (defs_depth == 0 && match_primitive_tag(lt, end, &prim_idx)) {
+            const char *tag_end = memchr(lt, '>', (size_t)(end - lt));
+            if (!tag_end) break;
+
+            SvgPrimitive prim = {0};
+            prim.kind  = kPrimTags[prim_idx].kind;
+            prim.xform = root_xf;
+
+            const char *vs, *ve;
+            if (find_attr(lt, tag_end, "id", &vs, &ve)) {
+                int n = (int)(ve - vs);
+                if (n > 0) prim.id = xml_decode(vs, n);
+            }
+            if (find_attr(lt, tag_end, "transform", &vs, &ve)) {
+                Mat23 local = parse_transform_chain(vs, (int)(ve - vs));
+                prim.xform = mat_mul(root_xf, local);
+            }
+            if (href_depth > 0 && href_stack[href_depth - 1])
+                prim.href = strdup(href_stack[href_depth - 1]);
+
+            float x = 0, y = 0, w = 0, h = 0, rx = 0, ry = 0;
+            float cx = 0, cy = 0, r = 0;
+            float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+            switch (prim.kind) {
+            case SVG_ELEM_RECT:
+                attr_float(lt, tag_end, "x", &x);
+                attr_float(lt, tag_end, "y", &y);
+                attr_float(lt, tag_end, "width",  &w);
+                attr_float(lt, tag_end, "height", &h);
+                attr_float(lt, tag_end, "rx", &rx);
+                attr_float(lt, tag_end, "ry", &ry);
+                prim.params[0] = x;  prim.params[1] = y;
+                prim.params[2] = w;  prim.params[3] = h;
+                prim.params[4] = rx; prim.params[5] = ry;
+                break;
+            case SVG_ELEM_CIRCLE:
+                attr_float(lt, tag_end, "cx", &cx);
+                attr_float(lt, tag_end, "cy", &cy);
+                attr_float(lt, tag_end, "r",  &r);
+                prim.params[0] = cx; prim.params[1] = cy; prim.params[2] = r;
+                break;
+            case SVG_ELEM_ELLIPSE:
+                attr_float(lt, tag_end, "cx", &cx);
+                attr_float(lt, tag_end, "cy", &cy);
+                attr_float(lt, tag_end, "rx", &rx);
+                attr_float(lt, tag_end, "ry", &ry);
+                prim.params[0] = cx; prim.params[1] = cy;
+                prim.params[2] = rx; prim.params[3] = ry;
+                break;
+            case SVG_ELEM_LINE:
+                attr_float(lt, tag_end, "x1", &x1);
+                attr_float(lt, tag_end, "y1", &y1);
+                attr_float(lt, tag_end, "x2", &x2);
+                attr_float(lt, tag_end, "y2", &y2);
+                prim.params[0] = x1; prim.params[1] = y1;
+                prim.params[2] = x2; prim.params[3] = y2;
+                break;
+            default:
+                /* PATH/POLYGON/POLYLINE — spacer record only. */
+                break;
+            }
+
+            prim_append(pl, prim);
+
+            /* Advance past the element. Primitives are usually self-closing;
+             * if not we scan for the matching close tag. */
+            int self_close = (tag_end > lt && tag_end[-1] == '/');
+            if (self_close) {
+                p = tag_end + 1;
+            } else {
+                char close_tag[16];
+                int cn = snprintf(close_tag, sizeof close_tag, "</%s>",
+                                  kPrimTags[prim_idx].name);
+                const char *close = memmem(tag_end + 1,
+                                           (size_t)(end - tag_end - 1),
+                                           close_tag, (size_t)cn);
+                p = close ? close + cn : tag_end + 1;
+            }
+            continue;
+        }
+
+        p = lt + 1;
+    }
+
     while (href_depth > 0) {
         href_depth--;
         free(href_stack[href_depth]);
@@ -758,14 +1002,31 @@ int svg_build_scene(const char *path, float extrusion_depth,
     if (!path || !out_scene) return -1;
     int extrude = extrusion_depth > 0.0f;
 
+    /* First pass: slurp the file and parse primitives + root transform so the
+     * nanosvg shape walk below can correlate each shape to its source element
+     * by doc-order index (nanosvg preserves source order; our extractor skips
+     * the same elements nanosvg skips — <defs>-nested primitives). */
+    size_t file_len = 0;
+    char *file_buf = slurp(path, &file_len);
+    Mat23 root_xf = mat_identity();
+    SvgPrimitiveList prims = {0};
+    if (file_buf) {
+        root_xf = extract_root_transform(file_buf, file_len);
+        extract_primitive_elements(file_buf, file_len, root_xf, &prims);
+    }
+
     NSVGimage *img = nsvgParseFromFile(path, "px", 96.0f);
     if (!img) {
         fprintf(stderr, "utterance: svg parse failed: %s\n", path);
+        prim_list_destroy(&prims);
+        free(file_buf);
         return -1;
     }
     if (img->width <= 0 || img->height <= 0) {
         fprintf(stderr, "utterance: svg has no dimensions: %s\n", path);
         nsvgDelete(img);
+        prim_list_destroy(&prims);
+        free(file_buf);
         return -1;
     }
 
@@ -780,17 +1041,26 @@ int svg_build_scene(const char *path, float extrusion_depth,
 
     /* Scratch buffers, reused across every shape + subpath. Allocated on
      * first need, grown only to the high-water mark, freed once at exit. */
-    GVec2       *poly      = NULL; uint32_t poly_cap   = 0;
-    uint32_t    *tri_idx   = NULL; uint32_t tri_cap    = 0;
-    GVec2       *ribbon    = NULL; uint32_t ribbon_cap = 0;
-    uint32_t    *strip_idx = NULL; uint32_t strip_cap  = 0;
-    SceneVertex *verts     = NULL; uint32_t verts_cap  = 0;
-    GVec3       *ex_verts  = NULL; uint32_t ex_verts_cap = 0;
-    uint32_t    *ex_idx    = NULL; uint32_t ex_idx_cap   = 0;
+    GVec2       *poly       = NULL; uint32_t poly_cap       = 0;
+    uint32_t    *tri_idx    = NULL; uint32_t tri_cap        = 0;
+    GVec2       *ribbon     = NULL; uint32_t ribbon_cap     = 0;
+    uint32_t    *strip_idx  = NULL; uint32_t strip_cap      = 0;
+    SceneVertex *verts      = NULL; uint32_t verts_cap      = 0;
+    GVec3       *ex_verts   = NULL; uint32_t ex_verts_cap   = 0;
+    GVec3       *ex_normals = NULL; uint32_t ex_normals_cap = 0;
+    uint32_t    *ex_idx     = NULL; uint32_t ex_idx_cap     = 0;
 
     int shape_count = 0, fill_nodes = 0, stroke_nodes = 0;
+    int cuboid_swaps = 0, cylinder_swaps = 0, line_swaps = 0;
+    int prim_idx = 0;
 
     for (NSVGshape *shape = img->shapes; shape; shape = shape->next) {
+        /* Advance the primitive cursor in lockstep with nanosvg's shape list,
+         * regardless of whether we end up drawing this shape. Keeps doc-order
+         * alignment intact across skipped-invisible shapes. */
+        SvgPrimitive *prim = (prim_idx < prims.count) ? &prims.items[prim_idx] : NULL;
+        prim_idx++;
+
         if (!(shape->flags & NSVG_FLAGS_VISIBLE)) continue;
         shape_count++;
 
@@ -819,33 +1089,229 @@ int svg_build_scene(const char *path, float extrusion_depth,
             stroke_mat = scene_add_material(out_scene, &m);
         }
 
+        /* Provenance that every emitted node for this shape inherits. */
+        SvgElemKind node_elem = prim ? prim->kind : SVG_ELEM_PATH;
+        char *node_href = prim ? prim->href : NULL;
+
+        /* Rects without rounded corners become cuboids when extruded — one
+         * fill-mesh emit per shape instead of per subpath. Detected once up
+         * front; the fill loop below checks the flag and skips its work. */
+        int cuboid_emit = (extrude && has_fill && prim &&
+                           prim->kind == SVG_ELEM_RECT &&
+                           prim->params[2] > 0 && prim->params[3] > 0 &&
+                           prim->params[4] == 0.0f && prim->params[5] == 0.0f);
+        if (cuboid_emit) {
+            float rx = prim->params[0], ry = prim->params[1];
+            float rw = prim->params[2], rh = prim->params[3];
+            /* 4 corners in SVG y-down space → apply element transform → y-flip
+             * to world y-up. SVG clockwise order (tl,tr,br,bl) becomes CCW in
+             * world space after the flip, which is what geom_build_cuboid wants. */
+            GVec2 w[4];
+            float sx, sy;
+            mat_apply(prim->xform, rx,      ry,      &sx, &sy); w[0].x = sx; w[0].y = -sy;
+            mat_apply(prim->xform, rx + rw, ry,      &sx, &sy); w[1].x = sx; w[1].y = -sy;
+            mat_apply(prim->xform, rx + rw, ry + rh, &sx, &sy); w[2].x = sx; w[2].y = -sy;
+            mat_apply(prim->xform, rx,      ry + rh, &sx, &sy); w[3].x = sx; w[3].y = -sy;
+
+            ENSURE_CAP(ex_verts,   ex_verts_cap,   24, GVec3);
+            ENSURE_CAP(ex_normals, ex_normals_cap, 24, GVec3);
+            ENSURE_CAP(ex_idx,     ex_idx_cap,     36, uint32_t);
+            uint32_t tcount = geom_build_cuboid(w[0], w[1], w[2], w[3], extrusion_depth,
+                                                ex_verts, ex_normals, ex_idx);
+            if (tcount > 0) {
+                ENSURE_CAP(verts, verts_cap, 24, SceneVertex);
+                for (int k = 0; k < 24; k++) {
+                    SceneVertex v = {0};
+                    v.pos[0]    = ex_verts[k].x;
+                    v.pos[1]    = ex_verts[k].y;
+                    v.pos[2]    = ex_verts[k].z;
+                    v.normal[0] = ex_normals[k].x;
+                    v.normal[1] = ex_normals[k].y;
+                    v.normal[2] = ex_normals[k].z;
+                    v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                    verts[k] = v;
+                }
+                int mid = scene_add_mesh(out_scene, verts, 24, ex_idx, tcount * 3);
+                SceneNode nd = {0};
+                scene_mat_identity(nd.local_xform);
+                nd.parent      = -1;
+                nd.mesh_id     = mid;
+                nd.material_id = fill_mat;
+                nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                nd.svg_elem    = SVG_ELEM_RECT;
+                nd.depth       = extrusion_depth;
+                memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                nd.href        = node_href;
+                scene_add_node(out_scene, &nd);
+                fill_nodes++;
+                cuboid_swaps++;
+            }
+        }
+
+        /* Circles and ellipses become authored cylinders when extruded with a
+         * fill. Sample a 32-point ring in SVG user-space, push it through the
+         * element transform, y-flip, hand off to geom_build_cylinder. Any
+         * stroke on the shape still emits as a ribbon via the normal stroke
+         * path below (sits at depth + 0.5 on top of the cap). */
+        int cylinder_emit = (extrude && has_fill && prim &&
+                             (prim->kind == SVG_ELEM_CIRCLE ||
+                              prim->kind == SVG_ELEM_ELLIPSE));
+        if (cylinder_emit) {
+            float ccx = prim->params[0], ccy = prim->params[1];
+            float crx, cry;
+            if (prim->kind == SVG_ELEM_CIRCLE) {
+                crx = cry = prim->params[2];
+            } else {
+                crx = prim->params[2]; cry = prim->params[3];
+            }
+            enum { CYL_N = 32 };
+            GVec2 ring[CYL_N];
+            for (int i = 0; i < CYL_N; i++) {
+                float t = (float)i / (float)CYL_N * 2.0f * (float)M_PI;
+                float sxp = ccx + crx * cosf(t);
+                float syp = ccy + cry * sinf(t);
+                float wxp, wyp;
+                mat_apply(prim->xform, sxp, syp, &wxp, &wyp);
+                ring[i].x =  wxp;
+                ring[i].y = -wyp;
+            }
+            uint32_t vmax  = 2 + 4 * CYL_N;
+            uint32_t ineed = 12 * CYL_N;
+            ENSURE_CAP(ex_verts,   ex_verts_cap,   vmax,  GVec3);
+            ENSURE_CAP(ex_normals, ex_normals_cap, vmax,  GVec3);
+            ENSURE_CAP(ex_idx,     ex_idx_cap,     ineed, uint32_t);
+            uint32_t tcount = geom_build_cylinder(ring, CYL_N, extrusion_depth,
+                                                  ex_verts, ex_normals, ex_idx);
+            if (tcount > 0) {
+                ENSURE_CAP(verts, verts_cap, vmax, SceneVertex);
+                for (uint32_t k = 0; k < vmax; k++) {
+                    SceneVertex v = {0};
+                    v.pos[0]    = ex_verts[k].x;
+                    v.pos[1]    = ex_verts[k].y;
+                    v.pos[2]    = ex_verts[k].z;
+                    v.normal[0] = ex_normals[k].x;
+                    v.normal[1] = ex_normals[k].y;
+                    v.normal[2] = ex_normals[k].z;
+                    v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                    verts[k] = v;
+                }
+                int mid = scene_add_mesh(out_scene, verts, vmax, ex_idx, tcount * 3);
+                SceneNode nd = {0};
+                scene_mat_identity(nd.local_xform);
+                nd.parent      = -1;
+                nd.mesh_id     = mid;
+                nd.material_id = fill_mat;
+                nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                nd.svg_elem    = prim->kind;
+                nd.depth       = extrusion_depth;
+                memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                nd.href        = node_href;
+                scene_add_node(out_scene, &nd);
+                fill_nodes++;
+                cylinder_swaps++;
+            }
+        }
+
+        /* <line> with a stroke becomes an oriented cuboid when extruded. The
+         * four bottom corners are the endpoints offset perpendicular by half
+         * the stroke width (world units — nanosvg already baked any transform
+         * scale into strokeWidth). Suppresses the default stroke ribbon for
+         * this shape. */
+        int line_cuboid_emit = (extrude && has_stroke && prim &&
+                                prim->kind == SVG_ELEM_LINE);
+        if (line_cuboid_emit) {
+            float x1 = prim->params[0], y1 = prim->params[1];
+            float x2 = prim->params[2], y2 = prim->params[3];
+            float wx1, wy1, wx2, wy2;
+            mat_apply(prim->xform, x1, y1, &wx1, &wy1);
+            mat_apply(prim->xform, x2, y2, &wx2, &wy2);
+            wy1 = -wy1; wy2 = -wy2;
+            float dx = wx2 - wx1, dy = wy2 - wy1;
+            float len = sqrtf(dx * dx + dy * dy);
+            if (len > 1e-6f) {
+                float hw = shape->strokeWidth * 0.5f;
+                float px = -dy / len * hw;
+                float py =  dx / len * hw;
+                GVec2 w0 = {wx1 + px, wy1 + py};
+                GVec2 w1 = {wx2 + px, wy2 + py};
+                GVec2 w2 = {wx2 - px, wy2 - py};
+                GVec2 w3 = {wx1 - px, wy1 - py};
+
+                ENSURE_CAP(ex_verts,   ex_verts_cap,   24, GVec3);
+                ENSURE_CAP(ex_normals, ex_normals_cap, 24, GVec3);
+                ENSURE_CAP(ex_idx,     ex_idx_cap,     36, uint32_t);
+                uint32_t tcount = geom_build_cuboid(w0, w1, w2, w3, extrusion_depth,
+                                                    ex_verts, ex_normals, ex_idx);
+                if (tcount > 0) {
+                    ENSURE_CAP(verts, verts_cap, 24, SceneVertex);
+                    for (int k = 0; k < 24; k++) {
+                        SceneVertex v = {0};
+                        v.pos[0]    = ex_verts[k].x;
+                        v.pos[1]    = ex_verts[k].y;
+                        v.pos[2]    = ex_verts[k].z;
+                        v.normal[0] = ex_normals[k].x;
+                        v.normal[1] = ex_normals[k].y;
+                        v.normal[2] = ex_normals[k].z;
+                        v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
+                        verts[k] = v;
+                    }
+                    int mid = scene_add_mesh(out_scene, verts, 24, ex_idx, tcount * 3);
+                    SceneNode nd = {0};
+                    scene_mat_identity(nd.local_xform);
+                    nd.parent      = -1;
+                    nd.mesh_id     = mid;
+                    nd.material_id = stroke_mat;
+                    nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
+                    nd.svg_elem    = SVG_ELEM_LINE;
+                    nd.depth       = extrusion_depth;
+                    memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                    nd.href        = node_href;
+                    scene_add_node(out_scene, &nd);
+                    stroke_nodes++;
+                    line_swaps++;
+                } else {
+                    /* degenerate length — let the ribbon path handle it */
+                    line_cuboid_emit = 0;
+                }
+            } else {
+                line_cuboid_emit = 0;
+            }
+        }
+
         for (NSVGpath *pth = shape->paths; pth; pth = pth->next) {
             uint32_t poly_count = 0;
             flatten_nsvg_path(pth, flatness, &poly, &poly_count, &poly_cap);
             if (poly_count < 2) continue;
 
             /* --- Fill --- */
-            if (has_fill && poly_count >= 3) {
+            if (has_fill && !cuboid_emit && !cylinder_emit && poly_count >= 3) {
                 if (extrude) {
-                    /* Prism: 2n verts, 6*(n-2) cap tris + 6*n side tris. */
-                    uint32_t vneed = poly_count * 2;
+                    /* Prism now emits 6n verts (caps + 4 per side quad) with
+                     * authored flat face normals. Index count unchanged. */
+                    uint32_t vmax  = poly_count * 6;
                     uint32_t ineed = 6 * (poly_count - 2) + 6 * poly_count;
-                    ENSURE_CAP(ex_verts, ex_verts_cap, vneed, GVec3);
-                    ENSURE_CAP(ex_idx,   ex_idx_cap,   ineed, uint32_t);
+                    ENSURE_CAP(ex_verts,   ex_verts_cap,   vmax,  GVec3);
+                    ENSURE_CAP(ex_normals, ex_normals_cap, vmax,  GVec3);
+                    ENSURE_CAP(ex_idx,     ex_idx_cap,     ineed, uint32_t);
+                    uint32_t ex_vcount = 0;
                     uint32_t tcount = geom_extrude_polygon(poly, poly_count,
                                                            extrusion_depth,
-                                                           ex_verts, ex_idx);
+                                                           ex_verts, ex_normals,
+                                                           ex_idx, &ex_vcount);
                     if (tcount > 0) {
-                        ENSURE_CAP(verts, verts_cap, vneed, SceneVertex);
-                        for (uint32_t k = 0; k < vneed; k++) {
+                        ENSURE_CAP(verts, verts_cap, ex_vcount, SceneVertex);
+                        for (uint32_t k = 0; k < ex_vcount; k++) {
                             SceneVertex v = {0};
-                            v.pos[0] = ex_verts[k].x;
-                            v.pos[1] = ex_verts[k].y;
-                            v.pos[2] = ex_verts[k].z;
+                            v.pos[0]    = ex_verts[k].x;
+                            v.pos[1]    = ex_verts[k].y;
+                            v.pos[2]    = ex_verts[k].z;
+                            v.normal[0] = ex_normals[k].x;
+                            v.normal[1] = ex_normals[k].y;
+                            v.normal[2] = ex_normals[k].z;
                             v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
                             verts[k] = v;
                         }
-                        int mid = scene_add_mesh(out_scene, verts, vneed,
+                        int mid = scene_add_mesh(out_scene, verts, ex_vcount,
                                                  ex_idx, tcount * 3);
                         SceneNode nd = {0};
                         scene_mat_identity(nd.local_xform);
@@ -853,8 +1319,10 @@ int svg_build_scene(const char *path, float extrusion_depth,
                         nd.mesh_id     = mid;
                         nd.material_id = fill_mat;
                         nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
-                        nd.svg_elem    = SVG_ELEM_PATH;
+                        nd.svg_elem    = node_elem;
                         nd.depth       = extrusion_depth;
+                        if (prim) memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                        nd.href        = node_href;
                         scene_add_node(out_scene, &nd);
                         fill_nodes++;
                     }
@@ -867,6 +1335,8 @@ int svg_build_scene(const char *path, float extrusion_depth,
                             SceneVertex v = {0};
                             v.pos[0] = poly[k].x;
                             v.pos[1] = poly[k].y;
+                            /* normal = (0,0,0) so the shader falls through to
+                             * unlit shade=1.0 for flat 2D fills. */
                             v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
                             verts[k] = v;
                         }
@@ -878,7 +1348,9 @@ int svg_build_scene(const char *path, float extrusion_depth,
                         nd.mesh_id     = mid;
                         nd.material_id = fill_mat;
                         nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
-                        nd.svg_elem    = SVG_ELEM_PATH;
+                        nd.svg_elem    = node_elem;
+                        if (prim) memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                        nd.href        = node_href;
                         scene_add_node(out_scene, &nd);
                         fill_nodes++;
                     }
@@ -886,7 +1358,7 @@ int svg_build_scene(const char *path, float extrusion_depth,
             }
 
             /* --- Stroke --- */
-            if (has_stroke) {
+            if (has_stroke && !line_cuboid_emit) {
                 uint32_t rv_count = poly_count * 2;
                 ENSURE_CAP(ribbon, ribbon_cap, rv_count, GVec2);
                 geom_stroke_ribbon(poly, poly_count, shape->strokeWidth * 0.5f,
@@ -905,6 +1377,7 @@ int svg_build_scene(const char *path, float extrusion_depth,
                     v.pos[0] = ribbon[k].x;
                     v.pos[1] = ribbon[k].y;
                     v.pos[2] = stroke_z;
+                    /* Zero normal — ribbons are flat, want full brightness. */
                     v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1.0f;
                     verts[k] = v;
                 }
@@ -925,7 +1398,9 @@ int svg_build_scene(const char *path, float extrusion_depth,
                 nd.mesh_id     = mid;
                 nd.material_id = stroke_mat;
                 nd.flags       = SCENE_NODE_VISIBLE | SCENE_NODE_SELECTABLE;
-                nd.svg_elem    = SVG_ELEM_PATH;
+                nd.svg_elem    = node_elem;
+                if (prim) memcpy(nd.svg_params, prim->params, sizeof nd.svg_params);
+                nd.href        = node_href;
                 scene_add_node(out_scene, &nd);
                 stroke_nodes++;
             }
@@ -938,6 +1413,7 @@ int svg_build_scene(const char *path, float extrusion_depth,
     free(strip_idx);
     free(verts);
     free(ex_verts);
+    free(ex_normals);
     free(ex_idx);
 
     if (extrude) out_scene->depth_enabled = 1;
@@ -946,21 +1422,21 @@ int svg_build_scene(const char *path, float extrusion_depth,
     float svg_h_final = img->height;
     nsvgDelete(img);
 
-    fprintf(stderr, "utterance: scene built — %d shapes, %d fill + %d stroke nodes, %u verts\n",
-            shape_count, fill_nodes, stroke_nodes, out_scene->vert_count);
+    fprintf(stderr, "utterance: scene built — %d shapes, %d fill + %d stroke nodes, "
+            "%d cuboid / %d cylinder / %d line swaps, %u verts\n",
+            shape_count, fill_nodes, stroke_nodes,
+            cuboid_swaps, cylinder_swaps, line_swaps, out_scene->vert_count);
 
-    /* Text extraction — mirrors svg_load's second pass. */
-    if (out_texts) {
-        size_t file_len = 0;
-        char *file_buf = slurp(path, &file_len);
-        if (file_buf) {
-            Mat23 root = extract_root_transform(file_buf, file_len);
-            extract_text_elements(file_buf, file_len, root, out_texts);
-            free(file_buf);
-            fprintf(stderr, "utterance: parsed %d <text> elements (viewbox %.0fx%.0f)\n",
-                    out_texts->count, svg_w_final, svg_h_final);
-        }
+    /* Text extraction — reuses the file buffer we slurped for primitive
+     * parsing, avoiding a second file read. */
+    if (out_texts && file_buf) {
+        extract_text_elements(file_buf, file_len, root_xf, out_texts);
+        fprintf(stderr, "utterance: parsed %d <text> elements (viewbox %.0fx%.0f)\n",
+                out_texts->count, svg_w_final, svg_h_final);
     }
+
+    prim_list_destroy(&prims);
+    free(file_buf);
 
     return 0;
 }

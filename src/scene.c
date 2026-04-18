@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "scene.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,29 +19,45 @@ static const char *scene_vert_src =
     "uniform mat4 u_model;\n"
     "uniform vec4 u_fill;\n"
     "out vec4 v_color;\n"
-    "out vec3 v_world_pos;\n"
+    "out vec3 v_normal;\n"
     "void main() {\n"
     "    v_color = a_color * u_fill;\n"
-    "    vec4 w = u_model * vec4(a_pos, 1.0);\n"
-    "    v_world_pos = w.xyz;\n"
-    "    gl_Position = u_mvp * w;\n"
+    "    v_normal = mat3(u_model) * a_normal;\n"
+    "    gl_Position = u_mvp * u_model * vec4(a_pos, 1.0);\n"
     "}\n";
 
-/* Derivative-based flat normal: dFdx/dFdy of world position give two edge
- * vectors of the triangle; their cross is the face normal. Works for any
- * mesh without needing authored per-vertex normals. Falls back to pure
- * v_color for degenerate triangles (normal length ~0). */
+/* Pick pass: minimal transform, writes the per-draw node id straight to a
+ * uint render target. No shading, no color attribute read — keeps the shader
+ * tiny and the frag invocations cheap. */
+static const char *scene_pick_vert_src =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 a_pos;\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_model;\n"
+    "void main() {\n"
+    "    gl_Position = u_mvp * u_model * vec4(a_pos, 1.0);\n"
+    "}\n";
+
+static const char *scene_pick_frag_src =
+    "#version 330 core\n"
+    "uniform uint u_id;\n"
+    "out uint frag_id;\n"
+    "void main() { frag_id = u_id; }\n";
+
+/* Authored per-vertex normals. Zero normal (length < 1e-6) falls through to
+ * unlit shade=1.0 so flat 2D fills and stroke ribbons — which never need
+ * directional lighting — stay full-bright. Extruded prisms and native
+ * primitives (cuboid, cylinder) author real face normals for Lambert shade. */
 static const char *scene_frag_src =
     "#version 330 core\n"
     "in vec4 v_color;\n"
-    "in vec3 v_world_pos;\n"
+    "in vec3 v_normal;\n"
     "uniform vec3 u_light_dir;\n"
+    "uniform vec3 u_tint;\n"
     "out vec4 frag_color;\n"
     "void main() {\n"
     "    if (v_color.a < 0.01) discard;\n"
-    "    vec3 dx = dFdx(v_world_pos);\n"
-    "    vec3 dy = dFdy(v_world_pos);\n"
-    "    vec3 n  = cross(dx, dy);\n"
+    "    vec3 n = v_normal;\n"
     "    float nl = length(n);\n"
     "    float shade = 1.0;\n"
     "    if (nl > 1e-6) {\n"
@@ -48,7 +65,7 @@ static const char *scene_frag_src =
     "        float ndl = max(dot(n, normalize(u_light_dir)), 0.0);\n"
     "        shade = 0.35 + 0.65 * ndl;\n"
     "    }\n"
-    "    frag_color = vec4(v_color.rgb * shade, v_color.a);\n"
+    "    frag_color = vec4(v_color.rgb * shade + u_tint, v_color.a);\n"
     "}\n";
 
 static GLuint compile_shader(GLenum type, const char *src) {
@@ -130,6 +147,24 @@ void scene_init(Scene *s) {
     s->loc_model     = glGetUniformLocation(s->default_shader, "u_model");
     s->loc_fill      = glGetUniformLocation(s->default_shader, "u_fill");
     s->loc_light_dir = glGetUniformLocation(s->default_shader, "u_light_dir");
+    s->loc_tint      = glGetUniformLocation(s->default_shader, "u_tint");
+
+    /* Pick shader — built up-front so the first pick call has no latency
+     * spike. The FBO and its textures are lazy because they need a size. */
+    GLuint pvs = compile_shader(GL_VERTEX_SHADER,   scene_pick_vert_src);
+    GLuint pfs = compile_shader(GL_FRAGMENT_SHADER, scene_pick_frag_src);
+    s->pick_shader = glCreateProgram();
+    glAttachShader(s->pick_shader, pvs);
+    glAttachShader(s->pick_shader, pfs);
+    glLinkProgram(s->pick_shader);
+    glDeleteShader(pvs);
+    glDeleteShader(pfs);
+    s->pick_loc_mvp   = glGetUniformLocation(s->pick_shader, "u_mvp");
+    s->pick_loc_model = glGetUniformLocation(s->pick_shader, "u_model");
+    s->pick_loc_id    = glGetUniformLocation(s->pick_shader, "u_id");
+
+    s->selected_node = -1;
+    s->hover_node    = -1;
 
     /* Neutral bounds (min > max means "empty"). */
     for (int i = 0; i < 3; i++) { s->bounds_min[i] = 1e30f; s->bounds_max[i] = -1e30f; }
@@ -150,6 +185,10 @@ void scene_destroy(Scene *s) {
     if (s->vbo) glDeleteBuffers(1, &s->vbo);
     if (s->ibo) glDeleteBuffers(1, &s->ibo);
     if (s->default_shader) glDeleteProgram(s->default_shader);
+    if (s->pick_shader)    glDeleteProgram(s->pick_shader);
+    if (s->pick_fbo)       glDeleteFramebuffers(1, &s->pick_fbo);
+    if (s->pick_color_tex) glDeleteTextures(1, &s->pick_color_tex);
+    if (s->pick_depth_rbo) glDeleteRenderbuffers(1, &s->pick_depth_rbo);
     memset(s, 0, sizeof *s);
 }
 
@@ -276,6 +315,110 @@ static void transform_point(const float m[16], const float p[3], float out[3]) {
     out[2] = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
 }
 
+/* Compute per-node world-space XY AABBs by transforming each node's local
+ * mesh AABB corners through its world_xform. Caller owns the returned buffer.
+ * box[i] = {x0, y0, x1, y1, valid}. */
+typedef struct { float x0, y0, x1, y1; int valid; } NodeAABB2;
+
+static NodeAABB2 *compute_node_aabbs(Scene *s) {
+    NodeAABB2 *boxes = calloc((size_t)s->node_count, sizeof(NodeAABB2));
+    if (!boxes) return NULL;
+    for (int i = 0; i < s->node_count; i++) {
+        SceneNode *n = &s->nodes[i];
+        if (n->mesh_id < 0 || n->mesh_id >= s->mesh_count) continue;
+        SceneMesh *m = &s->meshes[n->mesh_id];
+        float mn[2] = { 1e30f,  1e30f};
+        float mx[2] = {-1e30f, -1e30f};
+        for (int c = 0; c < 8; c++) {
+            float p[3] = {
+                (c & 1) ? m->bounds_max[0] : m->bounds_min[0],
+                (c & 2) ? m->bounds_max[1] : m->bounds_min[1],
+                (c & 4) ? m->bounds_max[2] : m->bounds_min[2],
+            };
+            float w[3];
+            transform_point(n->world_xform, p, w);
+            if (w[0] < mn[0]) mn[0] = w[0];
+            if (w[1] < mn[1]) mn[1] = w[1];
+            if (w[0] > mx[0]) mx[0] = w[0];
+            if (w[1] > mx[1]) mx[1] = w[1];
+        }
+        boxes[i].x0 = mn[0]; boxes[i].y0 = mn[1];
+        boxes[i].x1 = mx[0]; boxes[i].y1 = mx[1];
+        boxes[i].valid = 1;
+    }
+    return boxes;
+}
+
+void scene_compute_groups(Scene *s) {
+    if (s->node_count <= 0) return;
+    NodeAABB2 *boxes = compute_node_aabbs(s);
+    if (!boxes) return;
+
+    /* Canonical peer per rect. A stroked SVG rect emits both a fill cuboid
+     * and a stroke ribbon — both svg_elem=RECT, both with the same world
+     * AABB. Collapsing them to a single canonical index means "same lane"
+     * is a single integer compare at render time regardless of which peer
+     * the user happened to click. */
+    int *canon = malloc((size_t)s->node_count * sizeof(int));
+    if (!canon) { free(boxes); return; }
+    for (int i = 0; i < s->node_count; i++) canon[i] = -1;
+    for (int i = 0; i < s->node_count; i++) {
+        if (s->nodes[i].svg_elem != SVG_ELEM_RECT || !boxes[i].valid) continue;
+        canon[i] = i;
+        for (int j = 0; j < i; j++) {
+            if (s->nodes[j].svg_elem != SVG_ELEM_RECT || !boxes[j].valid) continue;
+            float eps = 1.0f;
+            if (fabsf(boxes[i].x0 - boxes[j].x0) < eps &&
+                fabsf(boxes[i].y0 - boxes[j].y0) < eps &&
+                fabsf(boxes[i].x1 - boxes[j].x1) < eps &&
+                fabsf(boxes[i].y1 - boxes[j].y1) < eps) {
+                canon[i] = canon[j];
+                break;
+            }
+        }
+    }
+
+    /* Each node adopts the canonical peer of the smallest rect it lives in.
+     * Rects resolve to their own canonical so group_id == group_id works
+     * uniformly in the focus test. Lines use AABB intersection instead of
+     * center-inside — a connector stem's center often lies above/below the
+     * lane strip it belongs to. Events (circles/ellipses/paths) still use
+     * center-inside since they're usually drawn inside their lane. */
+    for (int i = 0; i < s->node_count; i++) {
+        SceneNode *n = &s->nodes[i];
+        n->group_id = (n->svg_elem == SVG_ELEM_RECT) ? canon[i] : -1;
+        if (!boxes[i].valid || n->svg_elem == SVG_ELEM_RECT) continue;
+
+        float cx = (boxes[i].x0 + boxes[i].x1) * 0.5f;
+        float cy = (boxes[i].y0 + boxes[i].y1) * 0.5f;
+
+        int   best = -1;
+        float best_area = 1e30f;
+        for (int j = 0; j < s->node_count; j++) {
+            if (i == j) continue;
+            if (s->nodes[j].svg_elem != SVG_ELEM_RECT) continue;
+            if (!boxes[j].valid) continue;
+            int inside;
+            if (n->svg_elem == SVG_ELEM_LINE) {
+                inside = !(boxes[i].x1 < boxes[j].x0 ||
+                           boxes[i].x0 > boxes[j].x1 ||
+                           boxes[i].y1 < boxes[j].y0 ||
+                           boxes[i].y0 > boxes[j].y1);
+            } else {
+                inside = (cx >= boxes[j].x0 && cx <= boxes[j].x1 &&
+                          cy >= boxes[j].y0 && cy <= boxes[j].y1);
+            }
+            if (!inside) continue;
+            float area = (boxes[j].x1 - boxes[j].x0) * (boxes[j].y1 - boxes[j].y0);
+            if (area < best_area) { best_area = area; best = j; }
+        }
+        n->group_id = (best >= 0) ? canon[best] : -1;
+    }
+
+    free(canon);
+    free(boxes);
+}
+
 void scene_compute_bounds(Scene *s) {
     float mn[3] = { 1e30f,  1e30f,  1e30f};
     float mx[3] = {-1e30f, -1e30f, -1e30f};
@@ -325,6 +468,21 @@ void scene_render(const Scene *s, const float mvp[16]) {
         glUniform3f(s->loc_light_dir, 0.4f, 0.6f, 0.8f);
     glBindVertexArray(s->vao);
 
+    /* Focus gating: when the user has picked something, every other node
+     * dims to push the selection to the front. Lines (connector stems) are
+     * visual clutter at full brightness, so they're always faded a bit and
+     * dim further when they're not the focus. Selecting or hovering a lane
+     * rect pulls every grouped child into focus too, so a whole timeline
+     * lane brightens at once. */
+    int has_selection = (s->selected_node >= 0 && s->selected_node < s->node_count);
+    int has_hover     = (s->hover_node    >= 0 && s->hover_node    < s->node_count);
+    int sel_is_group  = has_selection &&
+                        s->nodes[s->selected_node].svg_elem == SVG_ELEM_RECT;
+    int hov_is_group  = has_hover &&
+                        s->nodes[s->hover_node].svg_elem == SVG_ELEM_RECT;
+    int sel_group_key = sel_is_group ? s->nodes[s->selected_node].group_id : -1;
+    int hov_group_key = hov_is_group ? s->nodes[s->hover_node].group_id    : -1;
+
     for (int i = 0; i < s->node_count; i++) {
         const SceneNode *n = &s->nodes[i];
         if (n->mesh_id < 0 || !(n->flags & SCENE_NODE_VISIBLE)) continue;
@@ -337,10 +495,124 @@ void scene_render(const Scene *s, const float mvp[16]) {
         float fill[4] = {1, 1, 1, 1};
         if (mat) memcpy(fill, mat->fill_rgba, sizeof fill);
 
+        int is_focus = (i == s->selected_node) || (i == s->hover_node);
+        if (!is_focus && sel_is_group && n->group_id == sel_group_key) is_focus = 1;
+        if (!is_focus && hov_is_group && n->group_id == hov_group_key) is_focus = 1;
+        int is_line  = (n->svg_elem == SVG_ELEM_LINE);
+
+        /* Base attenuation: stems are always softer than fills. */
+        float rgb_mul = 1.0f, alpha_mul = 1.0f;
+        if (is_line && !is_focus) { rgb_mul = 0.55f; alpha_mul = 0.40f; }
+
+        /* Stronger dim when there's a selection: pushes non-focus nodes into
+         * the background so the selection reads as the subject. */
+        if (has_selection && !is_focus) {
+            rgb_mul   *= 0.30f;
+            alpha_mul *= 0.55f;
+        }
+
+        fill[0] *= rgb_mul; fill[1] *= rgb_mul; fill[2] *= rgb_mul;
+        fill[3] *= alpha_mul;
+
+        /* Highlight selected / hovered nodes with an additive tint. Selected
+         * reads brighter than hover so the two states are distinguishable
+         * when the cursor lingers on the active selection. */
+        float tint[3] = {0, 0, 0};
+        if (i == s->selected_node) { tint[0] = 0.25f; tint[1] = 0.35f; tint[2] = 0.55f; }
+        else if (i == s->hover_node) { tint[0] = 0.10f; tint[1] = 0.15f; tint[2] = 0.25f; }
+
         glUniformMatrix4fv(s->loc_model, 1, GL_FALSE, n->world_xform);
         glUniform4fv(s->loc_fill, 1, fill);
+        if (s->loc_tint >= 0) glUniform3fv(s->loc_tint, 1, tint);
         glDrawElements(GL_TRIANGLES, (GLsizei)m->ib_count, GL_UNSIGNED_INT,
                        (void *)(uintptr_t)(m->ib_offset * sizeof(uint32_t)));
     }
     glBindVertexArray(0);
+}
+
+/* ---------------------------------------------------------------- pick */
+
+static void pick_fbo_resize(Scene *s, int w, int h) {
+    if (s->pick_fbo && s->pick_w == w && s->pick_h == h) return;
+
+    if (!s->pick_fbo) {
+        glGenFramebuffers(1, &s->pick_fbo);
+        glGenTextures(1, &s->pick_color_tex);
+        glGenRenderbuffers(1, &s->pick_depth_rbo);
+    }
+
+    glBindTexture(GL_TEXTURE_2D, s->pick_color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, w, h, 0,
+                 GL_RED_INTEGER, GL_UNSIGNED_INT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, s->pick_depth_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, s->pick_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, s->pick_color_tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, s->pick_depth_rbo);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        fprintf(stderr, "scene: pick fbo incomplete: 0x%x\n", status);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    s->pick_w = w;
+    s->pick_h = h;
+}
+
+int scene_pick(Scene *s, const float mvp[16], int px, int py, int fb_w, int fb_h) {
+    if (!s->uploaded || s->node_count == 0) return -1;
+    if (fb_w <= 0 || fb_h <= 0) return -1;
+    if (px < 0 || py < 0 || px >= fb_w || py >= fb_h) return -1;
+
+    pick_fbo_resize(s, fb_w, fb_h);
+    if (!s->pick_fbo) return -1;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, s->pick_fbo);
+    glViewport(0, 0, fb_w, fb_h);
+    /* Clear to 0 = "miss". integer clear — floats would be normalized. */
+    GLuint clear_zero[4] = {0, 0, 0, 0};
+    glClearBufferuiv(GL_COLOR, 0, clear_zero);
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    if (s->depth_enabled) glEnable(GL_DEPTH_TEST);
+    else                  glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);    /* blending on GL_R32UI is undefined */
+
+    glUseProgram(s->pick_shader);
+    glUniformMatrix4fv(s->pick_loc_mvp, 1, GL_FALSE, mvp);
+    glBindVertexArray(s->vao);
+
+    for (int i = 0; i < s->node_count; i++) {
+        const SceneNode *n = &s->nodes[i];
+        if (n->mesh_id < 0 || !(n->flags & SCENE_NODE_VISIBLE)) continue;
+        if (!(n->flags & SCENE_NODE_SELECTABLE)) continue;
+        if (n->mesh_id >= s->mesh_count) continue;
+        const SceneMesh *m = &s->meshes[n->mesh_id];
+        if (m->ib_count == 0) continue;
+
+        glUniformMatrix4fv(s->pick_loc_model, 1, GL_FALSE, n->world_xform);
+        glUniform1ui(s->pick_loc_id, (GLuint)(i + 1));
+        glDrawElements(GL_TRIANGLES, (GLsizei)m->ib_count, GL_UNSIGNED_INT,
+                       (void *)(uintptr_t)(m->ib_offset * sizeof(uint32_t)));
+    }
+    glBindVertexArray(0);
+
+    GLuint id = 0;
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(px, py, 1, 1, GL_RED_INTEGER, GL_UNSIGNED_INT, &id);
+
+    glEnable(GL_BLEND);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (id == 0) return -1;
+    int idx = (int)id - 1;
+    if (idx < 0 || idx >= s->node_count) return -1;
+    return idx;
 }
