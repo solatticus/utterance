@@ -1,5 +1,10 @@
-#define _POSIX_C_SOURCE 200809L
-#include <unistd.h>
+#ifndef _WIN32
+#  define _POSIX_C_SOURCE 200809L
+#  include <unistd.h>
+#else
+#  include <io.h>
+#  include <windows.h>
+#endif
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
@@ -78,11 +83,19 @@ void image_init_renderer(void) {
     glBindVertexArray(0);
 }
 
+static int is_path_sep(char c) { return c == '/' || c == '\\'; }
+
 /* Resolve path relative to base_dir */
 static char *resolve_path(const char *path, const char *base_dir) {
     if (!path || !path[0]) return NULL;
     /* Absolute path or URL — use as-is */
     if (path[0] == '/' || strstr(path, "://")) return strdup(path);
+#ifdef _WIN32
+    if ((path[0] >= 'A' && path[0] <= 'Z' && path[1] == ':') ||
+        (path[0] >= 'a' && path[0] <= 'z' && path[1] == ':') ||
+        (path[0] == '\\' && path[1] == '\\'))
+        return strdup(path);
+#endif
     if (!base_dir) return strdup(path);
 
     size_t blen = strlen(base_dir);
@@ -90,7 +103,7 @@ static char *resolve_path(const char *path, const char *base_dir) {
     char *full = malloc(blen + 1 + plen + 1);
     if (!full) return NULL;
     memcpy(full, base_dir, blen);
-    if (blen > 0 && base_dir[blen - 1] != '/') full[blen++] = '/';
+    if (blen > 0 && !is_path_sep(base_dir[blen - 1])) full[blen++] = '/';
     memcpy(full + blen, path, plen);
     full[blen + plen] = '\0';
     return full;
@@ -101,9 +114,17 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
     char *resolved = resolve_path(path, base_dir);
     if (!resolved) return -1;
 
-    /* Fetch remote URLs with curl → temp file */
+    /* Fetch remote URLs with curl -> temp file */
     char *tmp_path = NULL;
+    int is_temp = 0;
     if (strstr(resolved, "://")) {
+#ifdef _WIN32
+        char tmp_dir[MAX_PATH];
+        GetTempPathA(MAX_PATH, tmp_dir);
+        tmp_path = malloc(MAX_PATH);
+        if (!tmp_path) { free(resolved); return -1; }
+        GetTempFileNameA(tmp_dir, "ut_", 0, tmp_path);
+#else
         tmp_path = strdup("/tmp/utterance-img-XXXXXX");
         int fd = mkstemp(tmp_path);
         if (fd < 0) {
@@ -112,12 +133,21 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
             return -1;
         }
         close(fd);
+#endif
         char cmd[2048];
+#ifdef _WIN32
+        snprintf(cmd, sizeof(cmd), "curl -sL -o \"%s\" \"%s\" 2>NUL", tmp_path, resolved);
+#else
         snprintf(cmd, sizeof(cmd), "curl -sL -o '%s' '%s' 2>/dev/null", tmp_path, resolved);
+#endif
         int ret = system(cmd);
         if (ret != 0) {
             fprintf(stderr, "utterance: failed to fetch image: %s\n", resolved);
+#ifdef _WIN32
+            DeleteFileA(tmp_path);
+#else
             unlink(tmp_path);
+#endif
             free(resolved); free(tmp_path);
             return -1;
         }
@@ -125,9 +155,8 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
         free(resolved);
         resolved = tmp_path;
         tmp_path = NULL;
+        is_temp = 1;
     }
-
-    int is_temp = (strncmp(resolved, "/tmp/utterance-img-", 19) == 0);
 
     /* Sniff the file header: SVG is XML-ish text, not a binary image, so
      * stbi_load won't decode it. Peek at the first 256 bytes and route SVGs
@@ -156,7 +185,11 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
         if (svg_w_req > 8192) svg_w_req = 8192;
         if (svg_load(resolved, svg_w_req, &tex, &w, &h, &texts, &svg_w, &svg_h) != 0) {
             fprintf(stderr, "utterance: can't load svg: %s\n", resolved);
+#ifdef _WIN32
+            if (is_temp) DeleteFileA(resolved);
+#else
             if (is_temp) unlink(resolved);
+#endif
             free(resolved);
             return -1;
         }
@@ -166,7 +199,11 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
         unsigned char *data = stbi_load(resolved, &w, &h, &channels, 4); /* force RGBA */
         if (!data) {
             fprintf(stderr, "utterance: can't load image: %s\n", resolved);
+#ifdef _WIN32
+            if (is_temp) DeleteFileA(resolved);
+#else
             if (is_temp) unlink(resolved);
+#endif
             free(resolved);
             return -1;
         }
@@ -190,7 +227,11 @@ int image_load(ImageList *il, const char *path, const char *base_dir,
         glBindTexture(GL_TEXTURE_2D, 0);
         stbi_image_free(data);
     }
+#ifdef _WIN32
+    if (is_temp) DeleteFileA(resolved);
+#else
     if (is_temp) unlink(resolved);
+#endif
     free(resolved);
 
     /* Add to list */

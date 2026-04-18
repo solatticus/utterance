@@ -14,7 +14,12 @@ static void scroll_cb(GLFWwindow *win, double xoff, double yoff) {
     uw->scroll_y += (float)yoff;
 }
 
+static void glfw_error_cb(int code, const char *msg) {
+    fprintf(stderr, "utterance: glfw error %d: %s\n", code, msg);
+}
+
 int window_init(Window *w, int width, int height, const char *title) {
+    glfwSetErrorCallback(glfw_error_cb);
     if (!glfwInit()) {
         fprintf(stderr, "utterance: glfwInit failed\n");
         return -1;
@@ -22,7 +27,9 @@ int window_init(Window *w, int width, int height, const char *title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
     glfwWindowHint(GLFW_SAMPLES, 4);
 
     w->handle = glfwCreateWindow(width, height, title, NULL, NULL);

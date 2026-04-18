@@ -2,9 +2,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
+
+#ifdef _WIN32
+#  include <io.h>
+#  include <windows.h>
+#else
+#  include <unistd.h>
+#  include <fcntl.h>
+#endif
 
 int source_from_file(Source *s, const char *path) {
     memset(s, 0, sizeof(*s));
@@ -33,9 +39,14 @@ int source_from_fd(Source *s, int fd) {
     s->buf = malloc(s->cap);
     if (!s->buf) return -1;
 
+#ifdef _WIN32
+    /* On Windows, stdin pipe handle is used directly via Win32 API in source_poll */
+    (void)fd;
+#else
     /* Set non-blocking */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
     return 0;
 }
 
@@ -51,6 +62,24 @@ size_t source_poll(Source *s) {
         s->cap = new_cap;
     }
 
+#ifdef _WIN32
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+        s->eof = 1;
+        return 0;
+    }
+    if (avail == 0) return 0;
+    DWORD to_read = (DWORD)(s->cap - s->len);
+    if (to_read > avail) to_read = avail;
+    DWORD nread = 0;
+    if (!ReadFile(h, s->buf + s->len, to_read, &nread, NULL) || nread == 0) {
+        s->eof = 1;
+        return 0;
+    }
+    s->len += nread;
+    return (size_t)nread;
+#else
     ssize_t r = read(s->fd, s->buf + s->len, s->cap - s->len);
     if (r > 0) {
         s->len += r;
@@ -61,6 +90,7 @@ size_t source_poll(Source *s) {
     }
     /* EAGAIN/EWOULDBLOCK = nothing available, not an error */
     return 0;
+#endif
 }
 
 void source_destroy(Source *s) {

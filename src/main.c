@@ -1,4 +1,6 @@
-#define _POSIX_C_SOURCE 200809L
+#ifndef _WIN32
+#  define _POSIX_C_SOURCE 200809L
+#endif
 #define GL_LOADER_IMPLEMENTATION
 #include "gl_loader.h"
 #include "window.h"
@@ -12,14 +14,55 @@
 #include "image.h"
 #include "scene.h"
 #include "svg.h"
-#include <libgen.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <math.h>
+
+#ifdef _WIN32
+#  include <io.h>
+#  include <windows.h>
+#  include <shellapi.h>
+#  define isatty _isatty
+#  define fileno _fileno
+#else
+#  include <libgen.h>
+#  include <unistd.h>
+#  include <fcntl.h>
+#endif
+
+#ifdef _WIN32
+static char *portable_dirname(const char *path) {
+    if (!path) return strdup(".");
+    char *tmp = strdup(path);
+    /* Normalize separators */
+    for (char *p = tmp; *p; p++) if (*p == '\\') *p = '/';
+    char *last = strrchr(tmp, '/');
+    if (!last) { free(tmp); return strdup("."); }
+    *last = '\0';
+    char *result = strdup(tmp);
+    free(tmp);
+    return result ? result : strdup(".");
+}
+
+static const char *find_windows_font(void) {
+    static char fontpath[MAX_PATH];
+    const char *candidates[] = {
+        "C:\\Windows\\Fonts\\consola.ttf",
+        "C:\\Windows\\Fonts\\lucon.ttf",
+        "C:\\Windows\\Fonts\\cour.ttf",
+        NULL
+    };
+    for (int i = 0; candidates[i]; i++) {
+        if (GetFileAttributesA(candidates[i]) != INVALID_FILE_ATTRIBUTES) {
+            strncpy(fontpath, candidates[i], MAX_PATH - 1);
+            return fontpath;
+        }
+    }
+    return candidates[0]; /* fallback, will fail gracefully in font_load */
+}
+#endif
 
 #define MOUSE_SENSITIVITY 0.002f
 
@@ -40,7 +83,11 @@ static void key_callback(GLFWwindow *win, int key, int scancode, int action, int
 
 int main(int argc, char **argv) {
     /* 1. Parse args */
+#ifdef _WIN32
+    const char *font_path = find_windows_font();
+#else
     const char *font_path = "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf";
+#endif
     const char *file_arg = NULL;
     int force_markdown = 0;
     float extrusion_depth = 0.0f; /* 0 = flat; >0 extrudes svg fills along +z */
@@ -66,7 +113,33 @@ int main(int argc, char **argv) {
         if (source_from_file(&src, file_arg) == 0)
             have_source = 1;
     }
-    if (!have_source && !isatty(0)) {
+    if (!have_source && !isatty(fileno(stdin))) {
+#ifdef _WIN32
+        /* Windows: read stdin via Win32 handles */
+        if (source_from_fd(&src, 0) == 0) {
+            have_source = 1;
+            HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+            for (;;) {
+                if (src.len >= src.cap) {
+                    size_t new_cap = src.cap * 2;
+                    uint8_t *tmp = realloc(src.buf, new_cap);
+                    if (!tmp) break;
+                    src.buf = tmp;
+                    src.cap = new_cap;
+                }
+                DWORD nread = 0;
+                if (!ReadFile(h, src.buf + src.len, (DWORD)(src.cap - src.len), &nread, NULL) || nread == 0) {
+                    src.eof = 1;
+                    break;
+                }
+                src.len += nread;
+                /* Check if more is immediately available */
+                DWORD avail = 0;
+                if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0)
+                    break;
+            }
+        }
+#else
         /* Read an initial batch blocking, then switch to non-blocking for streaming */
         if (source_from_fd(&src, STDIN_FILENO) == 0) {
             have_source = 1;
@@ -108,6 +181,7 @@ int main(int argc, char **argv) {
                 }
             }
         }
+#endif
     }
 
     if (!have_source || src.len == 0) {
@@ -174,9 +248,13 @@ int main(int argc, char **argv) {
     /* Resolve base directory for relative image paths */
     char *base_dir = NULL;
     if (file_arg) {
+#ifdef _WIN32
+        base_dir = portable_dirname(file_arg);
+#else
         char *tmp = strdup(file_arg);
         base_dir = strdup(dirname(tmp));
         free(tmp);
+#endif
     }
 
     /* 3. Window + GL — if no display, just be cat */
@@ -663,12 +741,20 @@ int main(int argc, char **argv) {
                             for (int li = 0; li < md_links.count; li++) {
                                 if (off >= md_links.links[li].start_offset &&
                                     off < md_links.links[li].end_offset) {
+#ifdef _WIN32
+                                    ShellExecuteA(NULL, "open",
+                                                  md_links.links[li].url,
+                                                  NULL, NULL, SW_SHOWNORMAL);
+                                    fprintf(stderr, "utterance: opening %s\n",
+                                            md_links.links[li].url);
+#else
                                     char cmd[2048];
                                     snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
                                              md_links.links[li].url);
                                     if (system(cmd) == 0)
                                         fprintf(stderr, "utterance: opening %s\n",
                                                 md_links.links[li].url);
+#endif
                                     opened = 1;
                                     break;
                                 }
@@ -694,12 +780,20 @@ int main(int argc, char **argv) {
                             for (int li = 0; li < img->svg_links.count; li++) {
                                 if (gi >= img->svg_links.items[li].glyph_start &&
                                     gi <  img->svg_links.items[li].glyph_end) {
+#ifdef _WIN32
+                                    ShellExecuteA(NULL, "open",
+                                                  img->svg_links.items[li].href,
+                                                  NULL, NULL, SW_SHOWNORMAL);
+                                    fprintf(stderr, "utterance: opening %s\n",
+                                            img->svg_links.items[li].href);
+#else
                                     char cmd[2048];
                                     snprintf(cmd, sizeof(cmd), "xdg-open '%s' &",
                                              img->svg_links.items[li].href);
                                     if (system(cmd) == 0)
                                         fprintf(stderr, "utterance: opening %s\n",
                                                 img->svg_links.items[li].href);
+#endif
                                     opened = 1;
                                     break;
                                 }

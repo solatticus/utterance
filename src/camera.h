@@ -6,7 +6,7 @@ typedef struct {
     float yaw, pitch;
     float fov;
     float aspect;
-    float near, far;
+    float near_plane, far_plane;
 } Camera;
 
 void camera_init(Camera *c, float x, float y, float z);
